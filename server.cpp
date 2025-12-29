@@ -41,7 +41,10 @@ int main(int argc, char** argv){
         return 10;
     }
 
-    addrinfo hints {.ai_flags=AI_PASSIVE, .ai_family=AF_INET, .ai_protocol = IPPROTO_TCP};
+    addrinfo hints{};
+    hints.ai_flags=AI_PASSIVE;
+    hints.ai_family=AF_INET;
+    hints.ai_protocol = IPPROTO_TCP;
     addrinfo * resolved;
     int res;
     if((res= getaddrinfo("localhost", argv[1], &hints, &resolved))) {fprintf(stderr, "Getaddrinfo failed: %s\n", gai_strerror(res)); return 1;}
@@ -65,7 +68,7 @@ int main(int argc, char** argv){
         socklen_t clientAddrLen=sizeof(clientAddr);
         int clientSock=accept(sock, (sockaddr*)&clientAddr, &clientAddrLen);
         if(clientSock!=-1){
-            client cl={.fd=clientSock};
+            client cl {.fd=clientSock, .nick=""};
             clients.push_back(cl);
             std::thread(handleComms, clientSock, clientAddr).detach();
         }
