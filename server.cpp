@@ -16,9 +16,10 @@
 #include <boost/container/string.hpp>
 #include <signal.h>
 
-#define buff_size 50
+#define buff_size 1400
 #define shm "TotemMem"
 #define mut "TotemMut"
+#define timeoutLen 30
 
 using namespace boost::interprocess;
 
@@ -49,31 +50,74 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     managed_shared_memory segment(open_only, shm);
     clientVector* clients=segment.find<clientVector>("clients").first;
     named_mutex client_mutex(open_only, mut);
+    fcntl(clientSocket, F_SETFL, (fcntl(clientSocket, F_GETFL)|O_NONBLOCK));
 
-    char buff[buff_size]="Siemka\n";
+    char buff[buff_size]="Connected to the \"Totem\" game server. Choose your nickname:\n";
     printf("Connection from %s\n", inet_ntoa(clientAddress.sin_addr));
     write(clientSocket, buff, buff_size);
-    int readBytes=read(clientSocket, buff, buff_size-1);
-    buff[readBytes-1]='\000';
-    unsigned int i=0;
-    client_mutex.lock();
-    while(i<clients->size()){
-        if(clients->at(i).fd==clientSocket){
-            clients->at(i).nick.assign(buff, readBytes+1);
-            break;
-        };
-        i++;
+
+    unsigned int timeout=0;
+    unsigned int i;
+    int readBytes=1;
+    bool alreadySet=false;
+    while((timeout<timeoutLen)&&(readBytes!=0)){
+        memset(buff, '\000', buff_size);
+        if((readBytes=read(clientSocket, buff, buff_size-1))!=-1){
+            if(!alreadySet){
+                buff[readBytes-1]='\000';
+                i=0;
+                unsigned int clientIndex;
+                bool available=true;
+                
+                client_mutex.lock();
+                while(i<clients->size()){
+                    if(clients->at(i).fd==clientSocket){
+                        clientIndex=i;
+                        if(strcmp(clients->at(i).nick.c_str(), "")==0){
+                            alreadySet=true;
+                            break;
+                        }
+                    }
+                    if(strcmp(clients->at(i).nick.c_str(), buff)==0){
+                        available=false;
+                        break;
+                    }
+                    i++;
+                }
+                if(alreadySet){
+                    sprintf(buff, "Nickname already set\n");
+                    write(clientSocket, buff, 22);
+                }
+                if(available){
+                    clients->at(clientIndex).nick.assign(buff);
+                    sprintf(buff, "Nickname set successfully.\n");
+                    write(clientSocket, buff, 28);
+                    alreadySet=true;
+                }
+                else{
+                    sprintf(buff, "Nickname unavailable, choose another.\n");
+                    write(clientSocket, buff, 28);
+                }
+                client_mutex.unlock();
+            }
+        }
+        else{
+            timeout++;
+            sleep(1);
+        }
     }
-    client_mutex.unlock();
-    sleep(10);
+
+    
     client_mutex.lock();
     i=0;
     while(i<clients->size()){
         if(clients->at(i).fd==clientSocket)break;
         i++;
     }
+    printf("Client %s timed out.\n", clients->at(i).nick.c_str());
     clients->erase(clients->begin()+i);
     client_mutex.unlock();
+
     shutdown(clientSocket, SHUT_RDWR);
     close(clientSocket);
     return;
@@ -81,7 +125,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
 
  bool running=true;
 void terminator(int signum) {
-   printf("Terminating...\n");
+   printf("Terminating due to signal %d...\n", signum);
    running=false;
    return;
 }
