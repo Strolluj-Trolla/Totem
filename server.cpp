@@ -16,6 +16,7 @@
 #include <boost/container/vector.hpp>
 #include <boost/container/string.hpp>
 #include <signal.h>
+#include <ctime>
 
 #define buff_size 1400
 #define shm "TotemMem"
@@ -42,6 +43,17 @@ struct room{
     client players[8];
     time_t joinTimes[8];
     int spectatorCount;
+    room(const alloc& allocate): id(-1),
+        players {client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate),
+            client(-1, -1, "", allocate)},
+        joinTimes {-1,-1,-1,-1,-1,-1,-1,-1},
+        spectatorCount(0) {}
 };
 typedef struct client client;
 typedef struct room room;
@@ -121,7 +133,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
             }
             else{
                 cmd.sender=clientSocket;
-                buff[49]='\000';
+                memset(cmd.cmd, '\000', 50);
                 if(snprintf(cmd.cmd, 50, "%s", buff)>(int)sizeof(cmd.cmd)){
                     sprintf(buff, "Command too long.\n");
                     write(clientSocket, buff, 19);
@@ -164,6 +176,11 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     }
 
     
+    cmd.sender=clientSocket;
+    memset(cmd.cmd, '\000', 50);
+    sprintf(cmd.cmd, "leave");
+    mq.send(&cmd, sizeof(cmd), 0);
+
     client_mutex.lock();
     i=0;
     while(i<clients->size()){
@@ -184,6 +201,20 @@ void terminator(int signum) {
    printf("Terminating due to signal %d...\n", signum);
    running=false;
    return;
+}
+
+int getArgument(const char* cmd, int startIndex){
+    std::string arg="";
+    for(int i=startIndex; cmd[i]!='\000'; i++){
+        arg+=cmd[i];
+    }
+    try{
+        int num=std::stoi(arg);
+        return num;
+    }
+    catch(...){
+        return -1;
+    }
 }
 
 int main(int argc, char** argv){
@@ -247,7 +278,150 @@ int main(int argc, char** argv){
             unsigned int prio;
             message_queue::size_type recSize;
             if(mq.try_receive(&cmd, sizeof(cmd), recSize, prio)){
-
+                if(prio==0){
+                    if(strncmp(cmd.cmd, "leave", 5)==0){
+                        int roomId=-1;
+                        client_mutex.lock();
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                if(clients->at(i).roomId!=-1){
+                                    roomId=clients->at(i).roomId;
+                                    clients->at(i).roomId=-1;
+                                    break;
+                                }
+                                write(cmd.sender, "Currently not in a room.", 25);
+                            }
+                        }
+                        client_mutex.unlock();
+                        if(roomId!=-1){
+                            room_mutex.lock();
+                            bool found=false;
+                            for(unsigned int i=0; i<rooms->size(); i++){
+                                if(rooms->at(i).id==roomId){
+                                    for(int j=0; j<8; j++){
+                                        if(rooms->at(i).players[j].fd==cmd.sender){
+                                            rooms->at(i).players[j].fd=-1;
+                                            found=true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if(found)break;
+                            }
+                            room_mutex.unlock();
+                        }
+                    }
+                    if(strncmp(cmd.cmd, "create ", 6)==0){
+                        client_mutex.lock();
+                        bool found=false;
+                        unsigned int clientIndex;
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                clientIndex=i;
+                                if(clients->at(i).roomId!=-1){
+                                    found=true;
+                                    write(cmd.sender, "Already in a room.\n", 20);
+                                    break;
+                                }
+                            }
+                        }
+                        if(found){
+                            client_mutex.unlock();
+                            continue;
+                        };
+                        int roomId=getArgument(cmd.cmd, 7);
+                        if(roomId==-1){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Invalid argument.", 18);
+                            continue;
+                        }
+                        room_mutex.lock();
+                        found=false;
+                        for(unsigned int i=0; i<rooms->size(); i++){
+                            if(rooms->at(i).id==roomId){
+                                found=true;
+                                break;
+                            }
+                        }
+                        if(found){
+                            client_mutex.unlock();
+                            room_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" already exists\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        room temp(allocInst);
+                        temp.id=roomId;
+                        temp.joinTimes[0]=time(NULL);
+                        clients->at(clientIndex).roomId=roomId;
+                        temp.players[0]=clients->at(clientIndex);
+                        rooms->push_back(temp);
+                        room_mutex.unlock();
+                        client_mutex.unlock();
+                    }
+                    if(strncmp(cmd.cmd, "join ", 5)==0){
+                        client_mutex.lock();
+                        bool found=false;
+                        unsigned int clientIndex;
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                clientIndex=i;
+                                if(clients->at(i).roomId!=-1){
+                                    found=true;
+                                    break;
+                                }
+                            }
+                        }
+                        if(found){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Already in a room.\n", 20);
+                            continue;
+                        }
+                        int roomId=getArgument(cmd.cmd, 5);
+                        if(roomId==-1){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Invalid argument.", 18);
+                            continue;
+                        }
+                        room_mutex.lock();
+                        found=false;
+                        unsigned int roomIndex;
+                        int free=0;
+                        for(unsigned int i=0; i<rooms->size(); i++){
+                            if(rooms->at(i).id==roomId){
+                                roomIndex=i;
+                                found=true;
+                                for(int j=8; j<8; j++){
+                                    if(rooms->at(i).players[j].fd==-1)free++;
+                                }
+                                break;
+                            }
+                        }
+                        if(!found){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        if(free==0){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" is full.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        clients->at(clientIndex).roomId=roomId;
+                        for(int j=8; j<8; j++){
+                            if(rooms->at(roomIndex).players[j].fd==-1){
+                                rooms->at(roomIndex).players[j]=clients->at(clientIndex);
+                                break;
+                            }
+                        }
+                        client_mutex.unlock();
+                        room_mutex.unlock();
+                    }
+                }
             }
             else{
                 client_mutex.lock();
