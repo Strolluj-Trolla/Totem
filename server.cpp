@@ -170,7 +170,8 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
             }
         }
         else{
-            timeout++;
+            // debug
+            // timeout++;
             sleep(1);
         }
     }
