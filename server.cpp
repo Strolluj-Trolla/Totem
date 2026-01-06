@@ -22,7 +22,7 @@
 #define shm "TotemMem"
 #define clMut "TotemClientMut"
 #define rmMut "TotemRoomMut"
-#define msg "TotemQueue"
+#define MQ_NAME "TotemQueue"
 #define timeoutLen 30
 
 using namespace boost::interprocess;
@@ -70,131 +70,197 @@ typedef struct message message;
 
 void handleComms(int clientSocket, sockaddr_in clientAddress){
     managed_shared_memory segment(open_only, shm);
-    clientVector* clients=segment.find<clientVector>("clients").first;
-    roomVector* rooms=segment.find<roomVector>("rooms").first;
+    clientVector* clients = segment.find<clientVector>("clients").first;
+    roomVector* rooms     = segment.find<roomVector>("rooms").first;
     named_mutex client_mutex(open_only, clMut);
     named_mutex room_mutex(open_only, rmMut);
-    message_queue mq(open_only, msg);
-    fcntl(clientSocket, F_SETFL, (fcntl(clientSocket, F_GETFL)|O_NONBLOCK));
+    message_queue mq(open_only, MQ_NAME);
 
-    char buff[buff_size]="Connected to the \"Totem\" game server. Choose your nickname:\n";
+    // bufor danych od klienta
+    std::string inputBuffer; 
+
+    char buff[buff_size] = "Connected to the \"Totem\" game server. Choose your nickname:\n";
     printf("Connection from %s\n", inet_ntoa(clientAddress.sin_addr));
-    write(clientSocket, buff, buff_size);
+    write(clientSocket, buff, strlen(buff));
 
-    unsigned int timeout=0;
     unsigned int i;
-    int readBytes=1;
-    bool alreadySet=false;
+    bool alreadySet = false;
     message cmd;
-    while((timeout<timeoutLen)&&(readBytes!=0)){
-        memset(buff, '\000', buff_size);
-        if((readBytes=read(clientSocket, buff, buff_size-1))!=-1){
-            buff[readBytes-1]='\000';
-            i=0;
-            if(!alreadySet){
-                unsigned int clientIndex;
-                bool available=true;
-                
-                if((readBytes<4)||(readBytes>17)){
-                    sprintf(buff, "Nickname must be between 3 and 16 characters\n");
-                    write(clientSocket, buff, 46);
+
+    while (true) {
+        int readBytes = read(clientSocket, buff, buff_size - 1);
+        if (readBytes <= 0) {
+            // error lub zamknięcie połączenia przez klienta
+            break;
+        }
+
+        buff[readBytes] = '\0';
+        inputBuffer += buff;
+
+        // przetwarzenie pełnych linii (komend) z bufora
+        size_t pos;
+        while ((pos = inputBuffer.find('\n')) != std::string::npos) {
+            std::string line = inputBuffer.substr(0, pos);
+            inputBuffer.erase(0, pos + 1);
+
+            // Kompatybilność z klientami Windows
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+
+            if (line.empty())
+                continue;
+
+            //DEBUG
+            printf("[DEBUG] From %s: line='%s', len=%zu\n",
+                inet_ntoa(clientAddress.sin_addr),
+                line.c_str(),
+                line.length());
+
+            // --------- NICKNAME ---------
+
+            if (!alreadySet) {
+                std::string nick = line;
+
+                if (nick.length() < 3 || nick.length() > 16) {
+                    const char* msg = "Nickname must be between 3 and 16 characters\n";
+                    write(clientSocket, msg, strlen(msg));
                     continue;
                 }
+
+                //DEBUG
+                if (!alreadySet) {
+                    std::string nick = line;
+                    printf("[DEBUG] Nick attempt from %s: '%s' (len=%zu)\n",
+                        inet_ntoa(clientAddress.sin_addr),
+                        nick.c_str(),
+                        nick.length());
+                }
+
                 client_mutex.lock();
-                while(i<clients->size()){
-                    if(clients->at(i).fd==clientSocket){
-                        clientIndex=i;
-                        if(strcmp(clients->at(i).nick.c_str(), "")!=0){
-                            alreadySet=true;
+                bool available = true;
+                unsigned int clientIndex = 0;
+
+                // przeszukiwanie klientów w celu sprawdzenia dostępności nicku
+                for (i = 0; i < clients->size(); i++) {
+                    if (clients->at(i).fd == clientSocket) {
+                        clientIndex = i;
+                        if (clients->at(i).nick != "") {
+                            alreadySet = true;
                             break;
                         }
                     }
-                    if(strcmp(clients->at(i).nick.c_str(), buff)==0){
-                        available=false;
+                    if (clients->at(i).nick == nick.c_str()) {
+                        available = false;
                         break;
                     }
-                    i++;
                 }
-                if(alreadySet){
-                    sprintf(buff, "Nickname already set\n");
-                    write(clientSocket, buff, 22);
+
+                if (alreadySet) {
+                    const char* msg = "Nickname already set\n";
+                    write(clientSocket, msg, strlen(msg));
+                    client_mutex.unlock();
+                    continue;
                 }
-                if(available){
-                    clients->at(clientIndex).nick.assign(buff);
-                    sprintf(buff, "Nickname set successfully.\nAvailable commands: list, create roomId, join roomId, start, draw turnNum, grab turnNum, refresh, leave\n");
-                    write(clientSocket, buff, 28);
-                    alreadySet=true;
+
+                if (available) {
+                    clients->at(clientIndex).nick.assign(nick.c_str());
+                    const char* ok =
+                        "Nickname set successfully.\n"
+                        "Available commands: list, create roomId, join roomId, start, "
+                        "draw turnNum, grab turnNum, refresh, leave\n";
+                    write(clientSocket, ok, strlen(ok));
+                    alreadySet = true;
+                } else {
+                    const char* msg = "Nickname unavailable, choose another.\n";
+                    write(clientSocket, msg, strlen(msg));
                 }
-                else{
-                    sprintf(buff, "Nickname unavailable, choose another.\n");
-                    write(clientSocket, buff, 39);
-                }
+
                 client_mutex.unlock();
             }
-            else{
-                cmd.sender=clientSocket;
-                memset(cmd.cmd, '\000', 50);
-                if(snprintf(cmd.cmd, 50, "%s", buff)>(int)sizeof(cmd.cmd)){
-                    sprintf(buff, "Command too long.\n");
-                    write(clientSocket, buff, 19);
+
+            // --------- KOMENDY ---------
+
+            else {
+                std::string cmdStr = line;
+
+                cmd.sender = clientSocket;
+                memset(cmd.cmd, '\0', 50);
+                if (snprintf(cmd.cmd, 50, "%s", cmdStr.c_str()) >= (int)sizeof(cmd.cmd)) {
+                    const char* msg = "Command too long.\n";
+                    write(clientSocket, msg, strlen(msg));
                     continue;
-                };
-                if(strncmp(buff, "list", 4)==0){
+                }
+
+                // list
+                if (cmdStr.rfind("list", 0) == 0) {   // starts_with "list"
                     room_mutex.lock();
-                    memset(buff, '\000', buff_size);
-                    sprintf(buff, "Available rooms:\n");
-                    write(clientSocket, buff, 18);
-                    while(i<rooms->size()){
-                        room temp=rooms->at(i);
-                        std::string room="Room "+std::to_string(temp.id)+"- players:\n";
-                        for(int j=0; j<8; j++){
-                            if(temp.players[j].fd==-1)break;
-                            room+=std::string(temp.players[j].nick.c_str())+"\n";
+
+                    const char* header = "Available rooms:\n";
+                    write(clientSocket, header, strlen(header));
+
+                    for (i = 0; i < rooms->size(); i++) {
+                        room temp = rooms->at(i);
+                        std::string roomDesc =
+                            "Room " + std::to_string(temp.id) + "- players:\n";
+
+                        for (int j = 0; j < 8; j++) {
+                            if (temp.players[j].fd == -1) break;
+                            roomDesc += std::string(temp.players[j].nick.c_str()) + "\n";
                         }
-                        room+=std::to_string(temp.spectatorCount)+" spectators\n";
-                        sprintf(buff, room.c_str(), room.length());
-                        write(clientSocket, buff, room.length()+1);
+
+                        roomDesc += std::to_string(temp.spectatorCount) + " spectators\n";
+                        write(clientSocket, roomDesc.c_str(), roomDesc.length());
                     }
+
                     room_mutex.unlock();
                 }
                 else {
-                    if((strncmp(buff, "create ", 6)==0)||(strncmp(buff, "join ", 5)==0)||(strncmp(buff, "start", 5)==0)||(strncmp(buff, "leave", 5)==0))mq.send(&cmd, sizeof(cmd), 0);
-                    else{
-                        if((strncmp(buff, "draw ", 5)==0)||(strncmp(buff, "grab ", 5)==0)||(strncmp(buff, "refresh", 7)==0))mq.send(&cmd, sizeof(cmd), 1);
-                        else{
-                            sprintf(buff, "Unrecognized command.\n");
-                            write(clientSocket, buff, 23);
-                        }
+                    // create / join / start / leave - priorytet 0
+                    if (cmdStr.rfind("create ", 0) == 0 ||
+                        cmdStr.rfind("join ",   0) == 0 ||
+                        cmdStr.rfind("start",   0) == 0 ||
+                        cmdStr.rfind("leave",   0) == 0)
+                    {
+                        mq.send(&cmd, sizeof(cmd), 0);
+                    }
+                    // draw / grab / refresh - priorytet 1
+                    else if (cmdStr.rfind("draw ",    0) == 0 ||
+                             cmdStr.rfind("grab ",    0) == 0 ||
+                             cmdStr.rfind("refresh", 0) == 0)
+                    {
+                        mq.send(&cmd, sizeof(cmd), 1);
+                    }
+                    else {
+                        const char* msg = "Unrecognized command.\n";
+                        write(clientSocket, msg, strlen(msg));
                     }
                 }
             }
         }
-        else{
-            // debug
-            // timeout++;
-            sleep(1);
-        }
     }
 
-    
-    cmd.sender=clientSocket;
-    memset(cmd.cmd, '\000', 50);
+    // wyjście z pętli = klient kończy -> zostaje wysłany "leave" do kolejki
+    cmd.sender = clientSocket;
+    memset(cmd.cmd, '\0', 50);
     sprintf(cmd.cmd, "leave");
     mq.send(&cmd, sizeof(cmd), 0);
 
+    // usunięcie klienta ze wspólnej listy
     client_mutex.lock();
-    i=0;
-    while(i<clients->size()){
-        if(clients->at(i).fd==clientSocket)break;
+    i = 0;
+    while (i < clients->size()) {
+        if (clients->at(i).fd == clientSocket) break;
         i++;
     }
-    printf("Client %s timed out.\n", clients->at(i).nick.c_str());
-    clients->erase(clients->begin()+i);
+    if (i < clients->size()) {
+        printf("Client %s timed out.\n",
+               clients->at(i).nick.c_str()[0] ? clients->at(i).nick.c_str() : "unnamed");
+        clients->erase(clients->begin() + i);
+    }
     client_mutex.unlock();
 
     shutdown(clientSocket, SHUT_RDWR);
     close(clientSocket);
-    return;
 }
 
 bool running=true;
@@ -256,8 +322,8 @@ int main(int argc, char** argv){
         rm_mutex_remove() { named_mutex::remove(rmMut); }
         ~rm_mutex_remove(){ named_mutex::remove(rmMut); }
     } roomMutexRemover;
-    message_queue::remove(msg);
-    message_queue mq(create_only, msg, 100, sizeof(message));
+    message_queue::remove(MQ_NAME);
+    message_queue mq(create_only, MQ_NAME, 100, sizeof(message));
     named_mutex client_mutex(create_only, clMut);
     named_mutex room_mutex(create_only, rmMut);
     managed_shared_memory segment(create_only, shm, 65536);
@@ -270,8 +336,11 @@ int main(int argc, char** argv){
         sockaddr_in clientAddr;
         socklen_t clientAddrLen=sizeof(clientAddr);
         int clientSock=accept(sock, (sockaddr*)&clientAddr, &clientAddrLen);
-        if(clientSock!=-1){
+        if (clientSock != -1) {
+            client_mutex.lock();
             clients->emplace_back(clientSock, -1, "", allocInst);
+            client_mutex.unlock();
+
             std::thread(handleComms, clientSock, clientAddr).detach();
         }
         else{
@@ -440,7 +509,7 @@ int main(int argc, char** argv){
     sleep(2);
     segment.destroy<clientVector>("clients");
     segment.destroy<roomVector>("rooms");
-    message_queue::remove(msg);
+    message_queue::remove(MQ_NAME);
     freeaddrinfo(resolved);
     shutdown(sock, SHUT_RDWR);
     close(sock);
