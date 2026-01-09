@@ -508,6 +508,7 @@ int main(int argc, char** argv){
                         for(int j=8; j<8; j++){
                             if(rooms->at(roomIndex).players[j].fd==-1){
                                 rooms->at(roomIndex).players[j]=clients->at(clientIndex);
+                                rooms->at(roomIndex).joinTimes[j]=time(NULL);
                                 break;
                             }
                         }
@@ -559,6 +560,74 @@ int main(int argc, char** argv){
                         room_mutex.unlock();
                         client_mutex.unlock();
                     }
+                    if(strncmp(cmd.cmd, "start", 5)==0){
+                        client_mutex.lock();
+                        bool found=false;
+                        unsigned int clientIndex;
+                        int roomId;
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                clientIndex=i;
+                                roomId=clients->at(i).roomId;
+                                if(roomId!=-1)found=true;
+                                break;
+                            }
+                        }
+                        if(!found){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Not in a room.\n", 16);
+                            continue;
+                        }
+                        room_mutex.lock();
+                        found=false;
+                        unsigned int roomIndex;
+                        bool allowed=false;
+                        for(unsigned int i=0; i<rooms->size(); i++){
+                            if(rooms->at(i).id==roomId){
+                                roomIndex=i;
+                                found=true;
+                                int j;
+                                for(j=0; j<8; j++){
+                                    if(rooms->at(i).players[j].fd==cmd.sender)break;
+                                }
+                                time_t min=time(NULL);
+                                int minInd=0;
+                                for(int k=0;k<8;<k++){
+                                    if(rooms->at(i).joinTimes[k]<min){
+                                        min=rooms->at(i).joinTimes[k];
+                                        minInd=k;
+                                    }
+                                }
+                                if(j==minInd)allowed=true;
+                                break;
+                            }
+                        }
+                        if(!found){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        if(!allowed){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="You don't have perission to start a game in room "+
+                                std::to_string(roomId)+"\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        rooms->at(roomIndex).state=INPROGRESS;
+                        std::string qName="TotemRoom"+std::to_string(roomId);
+                        message_queue::remove(qName));
+                        message_queue mq(create_only, qName, 100, sizeof(message));
+                        std::thread(gameRunner, roomId).detach()
+                        room_mutex.unlock();
+                        client_mutex.unlock();
+                    }
+                }
+                else{
+                    //przekaż do kolejki pokoju, w którym znajduje się nadawca
                 }
             }
             else{
