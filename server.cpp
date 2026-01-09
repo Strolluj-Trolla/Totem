@@ -592,7 +592,7 @@ int main(int argc, char** argv){
                                 }
                                 time_t min=time(NULL);
                                 int minInd=0;
-                                for(int k=0;k<8;<k++){
+                                for(int k=0;k<8;k++){
                                     if(rooms->at(i).joinTimes[k]<min){
                                         min=rooms->at(i).joinTimes[k];
                                         minInd=k;
@@ -619,9 +619,9 @@ int main(int argc, char** argv){
                         }
                         rooms->at(roomIndex).state=INPROGRESS;
                         std::string qName="TotemRoom"+std::to_string(roomId);
-                        message_queue::remove(qName));
-                        message_queue mq(create_only, qName, 100, sizeof(message));
-                        std::thread(gameRunner, roomId).detach()
+                        message_queue::remove(qName.c_str());
+                        message_queue mq(create_only, qName.c_str(), 100, sizeof(message));
+                        std::thread(gameRunner, roomId).detach();
                         room_mutex.unlock();
                         client_mutex.unlock();
                     }
