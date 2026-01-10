@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <thread>
+#include <vector>
 #include <iostream>
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
@@ -294,7 +295,50 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     return;
 }
 
+void updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms, room& gameRoom, int& pCount, std::vector<client>& players){
+    mut.lock();
+    unsigned int i;
+    bool found=false;
+    for(i=0; i<rooms->size(); i++){
+        if(rooms->at(i).id==roomId){
+            found=true;
+            break;
+        }
+    }
+    if(!found){
+        mut.unlock();
+        std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+        printf("[error] Internal error - trying to serve game in room %d, which doesn't exist.", roomId);
+        return;
+    }
+    mut.lock();
+    gameRoom=rooms->at(i);
+    pCount=0;
+    for(i=0; i<8;i++){
+        if(gameRoom.players[i].fd!=-1) pCount++;
+    }
+    players.clear();
+    for(i=0; i<8;i++){
+        if(gameRoom.players[i].fd!=-1) players.push_back(gameRoom.players[i]);
+    };
+    mut.unlock();
+    return;
+}
+
 void gameRunner(long roomId){
+    managed_shared_memory segment(open_only, shm);
+    roomVector* rooms = segment.find<roomVector>("rooms").first;
+    named_mutex room_mutex(open_only, rmMut);
+    std::string qName="TotemRoom"+std::to_string(roomId);
+    message_queue mq(open_only, qName.c_str());
+    alloc allocInst(segment.get_segment_manager());
+
+    room gameRoom(allocInst);
+    std::vector<client> players;
+    int playerCount=0;
+    updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
+    
+
     return;
 }
 
@@ -390,6 +434,7 @@ int main(int argc, char** argv){
                             bool found=false;
                             unsigned int players=0;
                             unsigned int i;
+                            std::string qName="TotemRoom"+std::to_string(roomId);
                             for(i=0; i<rooms->size(); i++){
                                 if(rooms->at(i).id==roomId){
                                     for(int j=0; j<8; j++){
@@ -400,12 +445,15 @@ int main(int argc, char** argv){
                                         if(rooms->at(i).players[j].fd!=-1)players++;
                                     }
                                     if(!found)rooms->at(i).spectatorCount--;
+                                    if(rooms->at(i).state==INPROGRESS){
+                                        message_queue roomQ(open_only, qName.c_str());
+                                        roomQ.send(&cmd, sizeof(cmd), 1);
+                                    }
                                     break;
                                 }
                             }
                             if((players==0)&&(rooms->at(i).spectatorCount==0)){
                                 rooms->erase(rooms->begin()+i);
-                                std::string qName="TotemRoom"+std::to_string(roomId);
                                 message_queue::remove(qName.c_str());
                             }
                             room_mutex.unlock();
@@ -570,6 +618,11 @@ int main(int argc, char** argv){
                         }
                         clients->at(clientIndex).roomId=roomId;
                         rooms->at(roomIndex).spectatorCount++;
+                        if(rooms->at(roomIndex).state==INPROGRESS){
+                            std::string qName="TotemRoom"+std::to_string(roomId);
+                            message_queue roomQ(open_only, qName.c_str());
+                            roomQ.send(&cmd, sizeof(cmd), 1);
+                        }
                         room_mutex.unlock();
                         client_mutex.unlock();
                     }
@@ -593,13 +646,15 @@ int main(int argc, char** argv){
                         found=false;
                         unsigned int roomIndex;
                         bool allowed=false;
+                        unsigned int pCount=0;
                         for(unsigned int i=0; i<rooms->size(); i++){
                             if(rooms->at(i).id==roomId){
                                 roomIndex=i;
                                 found=true;
                                 int j;
-                                for(j=0; j<8; j++){
-                                    if(rooms->at(i).players[j].fd==cmd.sender)break;
+                                for(int k=0; k<8; k++){
+                                    if(rooms->at(i).players[k].fd!=-1)pCount++;
+                                    if(rooms->at(i).players[k].fd==cmd.sender)j=k;
                                 }
                                 time_t min=time(NULL);
                                 int minInd=0;
@@ -609,7 +664,7 @@ int main(int argc, char** argv){
                                         minInd=k;
                                     }
                                 }
-                                if(j==minInd)allowed=true;
+                                if((j==minInd)&&(pCount>=2))allowed=true;
                                 break;
                             }
                         }
@@ -624,7 +679,7 @@ int main(int argc, char** argv){
                             room_mutex.unlock();
                             client_mutex.unlock();
                             std::string err="You don't have permission to start a game in room "+
-                                std::to_string(roomId)+"\n";
+                                std::to_string(roomId)+" or there are less than 2 players.\n";
                             write(cmd.sender, err.c_str(), err.length()+1);
                             continue;
                         }
