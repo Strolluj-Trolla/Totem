@@ -18,6 +18,8 @@
 #include <boost/container/string.hpp>
 #include <signal.h>
 #include <ctime>
+#include <algorithm>
+#include <random>
 
 #define buff_size 1400
 #define shm "TotemMem"
@@ -103,7 +105,6 @@ int getArgument(const char* cmd, int startIndex){
         return -1;
     }
 }
-
 
 void handleComms(int clientSocket, sockaddr_in clientAddress){
     managed_shared_memory segment(open_only, shm);
@@ -295,7 +296,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     return;
 }
 
-void updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms, room& gameRoom, int& pCount, std::vector<client>& players){
+std::vector<int> updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms, room& gameRoom, int& pCount, std::vector<client>& players){
     mut.lock();
     unsigned int i;
     bool found=false;
@@ -308,10 +309,10 @@ void updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms, room& game
     if(!found){
         mut.unlock();
         std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-        printf("[error] Internal error - trying to serve game in room %d, which doesn't exist.", roomId);
-        return;
+        printf("[error] Internal error - trying to serve game in room %ld, which doesn't exist.", roomId);
+        return std::vector<int>();
     }
-    mut.lock();
+    std::vector<client> oldPlayers(players);
     gameRoom=rooms->at(i);
     pCount=0;
     for(i=0; i<8;i++){
@@ -322,8 +323,22 @@ void updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms, room& game
         if(gameRoom.players[i].fd!=-1) players.push_back(gameRoom.players[i]);
     };
     mut.unlock();
-    return;
+    std::vector<int> whoLeft;
+    for(i=0; i<oldPlayers.size(); i++){
+        int cntr=0;
+        for(client cl : players){
+            if(cl.fd==oldPlayers.at(i).fd)cntr++;
+        }
+        if(cntr==0)whoLeft.push_back(i);
+    }
+    return whoLeft;
 }
+
+struct card{
+    int color;
+    int shape;
+};
+typedef struct card card;
 
 void gameRunner(long roomId){
     managed_shared_memory segment(open_only, shm);
@@ -338,6 +353,77 @@ void gameRunner(long roomId){
     int playerCount=0;
     updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
     
+    std::vector<card> cards;
+    for(int i=0;i<18;i++){
+        for(int j=0; j<4; j++){
+            card c={.color=j, .shape=i};
+            cards.push_back(c);
+        }
+    }
+
+    std::random_device rd;
+    std::default_random_engine rng { rd() };
+    std::shuffle(std::begin(cards), std::end(cards), rng);
+    unsigned int currentPlayer=rng()%playerCount;
+    std::vector<std::vector<card>> hands;
+    for(int i=0; i<playerCount; i++){
+        hands.push_back(std::vector<card>());
+    }
+    for(unsigned int i=0; i<cards.size(); i++){
+        hands.at(i%playerCount).push_back(cards.at(i));
+    }
+    std::vector<std::vector<card>> table;
+    std::vector<card> pub;
+
+    bool end=false;
+    int timeout=0;
+    message cmd;
+    unsigned int prio;
+    message_queue::size_type recSize;
+    time_t timer=time(NULL);
+    unsigned long turnNum=0;
+    while(!end){
+        if(mq.try_receive(&cmd, sizeof(cmd), recSize, prio)){
+            if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
+                std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
+                if(!whoLeft.empty()){
+                    for(int j=whoLeft.size(); j>=0; j--){
+                        for(card c : hands.at(whoLeft.at(j))){
+                            pub.push_back(c);
+                        }
+                        for(card c : table.at(whoLeft.at(j))){
+                            pub.push_back(c);
+                        }
+                        hands.erase(hands.begin()+whoLeft.at(j));
+                        table.erase(table.begin()+whoLeft.at(j));
+                    }
+                }
+            }
+            else{
+                if((strncmp(cmd.cmd, "refresh", 7)==0)){
+                    std::string state="Turn "+std::to_string(turnNum)+"\n";
+                    for(int i=0; i<playerCount; i++){
+                        card topc=table.at(i).at(table.at(i).size()-1);
+                        state+="Player "+std::string(players.at(i).nick.c_str())+" has "+
+                            std::to_string(hands.at(i).size())+"cards in hand and "+
+                            std::to_string(table.at(i).size())+"cards on the table."+
+                            "Currently on top- color "+std::to_string(topc.color)+", shape "+
+                            std::to_string(topc.shape)+"\n";
+                    }
+                    state+=std::to_string(gameRoom.spectatorCount)+" spectators watching.";
+                    write(cmd.sender, state.c_str(), state.length());
+                }
+            }
+        }
+        else{
+            time_t last=timer;
+            timer=time(NULL);
+            timeout+=timer-last;
+            if(timeout>=30){
+                //wystaw mu karte
+            }
+        }
+    }
 
     return;
 }
@@ -493,7 +579,7 @@ int main(int argc, char** argv){
                             client_mutex.unlock();
                             room_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" already exists\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         room temp(allocInst);
@@ -547,14 +633,14 @@ int main(int argc, char** argv){
                             room_mutex.unlock();
                             client_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         if(free==0){
                             room_mutex.unlock();
                             client_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" is full.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         if(started){
@@ -562,7 +648,7 @@ int main(int argc, char** argv){
                             client_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" has already started playing. "+
                                 "Consider spectating instead.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         clients->at(clientIndex).roomId=roomId;
@@ -613,7 +699,7 @@ int main(int argc, char** argv){
                             room_mutex.unlock();
                             client_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         clients->at(clientIndex).roomId=roomId;
@@ -672,7 +758,7 @@ int main(int argc, char** argv){
                             room_mutex.unlock();
                             client_mutex.unlock();
                             std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         if(!allowed){
@@ -680,7 +766,7 @@ int main(int argc, char** argv){
                             client_mutex.unlock();
                             std::string err="You don't have permission to start a game in room "+
                                 std::to_string(roomId)+" or there are less than 2 players.\n";
-                            write(cmd.sender, err.c_str(), err.length()+1);
+                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         rooms->at(roomIndex).state=INPROGRESS;
@@ -725,7 +811,7 @@ int main(int argc, char** argv){
                         room_mutex.unlock();
                         client_mutex.unlock();
                         std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-                        write(cmd.sender, err.c_str(), err.length()+1);
+                        write(cmd.sender, err.c_str(), err.length());
                         continue;
                     }
                     std::string qName="TotemRoom"+std::to_string(roomId);
@@ -733,7 +819,7 @@ int main(int argc, char** argv){
                     if((strncmp(cmd.cmd, "refresh", 7)==0)&&(state==IDLE)){
                         room temp=rooms->at(roomIndex);
                         std::string roomDesc=describeRoom(&temp);
-                        write(cmd.sender, roomDesc.c_str(), roomDesc.length()+1);
+                        write(cmd.sender, roomDesc.c_str(), roomDesc.length());
                     }
                     else roomQ.send(&cmd, sizeof(cmd), 1);
                     room_mutex.unlock();
