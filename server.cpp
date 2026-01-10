@@ -99,6 +99,7 @@ int getArgument(const char* cmd, int startIndex){
     }
     try{
         int num=std::stoi(arg);
+        if(num<0)return -1;
         return num;
     }
     catch(...){
@@ -113,6 +114,11 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     named_mutex client_mutex(open_only, clMut);
     named_mutex room_mutex(open_only, rmMut);
     message_queue mq(open_only, MQ_NAME);
+    if((clients==0)||(rooms==0)){
+        shutdown(clientSocket, SHUT_RDWR);
+        close(clientSocket);
+        return;
+    }
 
     // bufor danych od klienta
     std::string inputBuffer; 
@@ -166,13 +172,10 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
                 }
 
                 //DEBUG
-                if (!alreadySet) {
-                    std::string nick = line;
-                    printf("[DEBUG] Nick attempt from %s: '%s' (len=%zu)\n",
-                        inet_ntoa(clientAddress.sin_addr),
-                        nick.c_str(),
-                        nick.length());
-                }
+                printf("[DEBUG] Nick attempt from %s: '%s' (len=%zu)\n",
+                    inet_ntoa(clientAddress.sin_addr),
+                    nick.c_str(),
+                    nick.length());
 
                 client_mutex.lock();
                 bool available = true;
@@ -364,7 +367,7 @@ void gameRunner(long roomId){
     std::random_device rd;
     std::default_random_engine rng { rd() };
     std::shuffle(std::begin(cards), std::end(cards), rng);
-    unsigned int currentPlayer=rng()%playerCount;
+    int currentPlayer=rng()%playerCount;
     std::vector<std::vector<card>> hands;
     for(int i=0; i<playerCount; i++){
         hands.push_back(std::vector<card>());
@@ -381,13 +384,14 @@ void gameRunner(long roomId){
     unsigned int prio;
     message_queue::size_type recSize;
     time_t timer=time(NULL);
-    unsigned long turnNum=0;
+    int turnNum=0;
     while(!end){
         if(mq.try_receive(&cmd, sizeof(cmd), recSize, prio)){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
                     for(int j=whoLeft.size(); j>=0; j--){
+                        if(currentPlayer>whoLeft.at(j))currentPlayer--;
                         for(card c : hands.at(whoLeft.at(j))){
                             pub.push_back(c);
                         }
@@ -398,6 +402,7 @@ void gameRunner(long roomId){
                         table.erase(table.begin()+whoLeft.at(j));
                     }
                 }
+
             }
             else{
                 if((strncmp(cmd.cmd, "refresh", 7)==0)){
@@ -412,6 +417,122 @@ void gameRunner(long roomId){
                     }
                     state+=std::to_string(gameRoom.spectatorCount)+" spectators watching.";
                     write(cmd.sender, state.c_str(), state.length());
+                }
+                if((strncmp(cmd.cmd, "draw ", 5)==0)){
+                    bool found=false;
+                    int i;
+                    for(i=0; i<playerCount; i++){
+                        if(cmd.sender==players[i].fd){
+                            found=true;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        std::string err="Spectators can't play.\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
+                    int reqTurn=getArgument(cmd.cmd, 5);
+                    if(reqTurn==-1){
+                        std::string err="Invalid argument.\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
+                    if(reqTurn==turnNum){
+                        if(i==currentPlayer){
+                            table.at(currentPlayer).push_back(hands.at(currentPlayer).at(0));
+                            hands.at(currentPlayer).erase(hands.at(currentPlayer).begin()+0);
+                            turnNum++;
+                            currentPlayer=(currentPlayer+1)%playerCount;
+                            timeout=0;
+                            timer=time(NULL);
+                        }
+                        else{
+                            std::string err="Not your turn.\n";
+                            write(cmd.sender, err.c_str(), err.length());
+                            continue;
+                        }
+                    }
+                    else{
+                        std::string err="Current turn is."+std::to_string(turnNum)+"\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
+                }
+                if((strncmp(cmd.cmd, "grab ", 5)==0)){
+                    bool found=false;
+                    int i;
+                    for(i=0; i<playerCount; i++){
+                        if(cmd.sender==players[i].fd){
+                            found=true;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        std::string err="Spectators can't play.\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
+                    int reqTurn=getArgument(cmd.cmd, 5);
+                    if(reqTurn==-1){
+                        std::string err="Invalid argument.\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
+                    if(reqTurn==turnNum){
+                        card c=table.at(i).at(table.at(i).size()-1);
+                        std::vector<int> opps;
+                        for(int j=0; j<playerCount; j++){
+                            if(j==i)continue;
+                            if(c.shape==table.at(j).at(table.at(j).size()-1).shape){
+                                opps.push_back(j);
+                            }
+                        }
+                        if(opps.empty()){
+                            for(int j=0; j<playerCount; j++){
+                                if(j==i)continue;
+                                for(card opC : table.at(j)){
+                                    hands.at(i).push_back(opC);
+                                }
+                                table.at(j).clear();
+                            }
+                            for(card opC : pub){
+                                hands.at(i).push_back(opC);
+                            }
+                            pub.clear();
+                            std::string mesg="You made a mistake. Take all the cards :)\n";
+                            write(cmd.sender, mesg.c_str(), mesg.length());
+                        }
+                        else{
+                            for(unsigned int j=0; j<table.at(i).size(); j++){
+                                hands.at(opps.at(j%opps.size())).push_back(table.at(i).at(j));
+                            }
+                            table.at(i).clear();
+                            std::string mesg="You win the fight.\n";
+                            write(cmd.sender, mesg.c_str(), mesg.length());
+                            mesg="You lost a fight- take cards from the winner.\n";
+                            for(int j : opps){
+                                write(players[j].fd, mesg.c_str(), mesg.length());
+                            }
+
+                            if((hands.at(i).empty())&&(table.at(i).empty())){
+                                //wygrana
+                                end=true;
+                                mesg="You won the game!\n";
+                                write(cmd.sender, mesg.c_str(), mesg.length());
+                                mesg="You lost the game.\n";
+                                for(int j=0; j<playerCount; j++){
+                                    if(j==i)continue;
+                                    write(players[j].fd, mesg.c_str(), mesg.length());
+                                }
+                            }
+                        }
+                    }
+                    else{
+                        std::string err="Current turn is."+std::to_string(turnNum)+"\n";
+                        write(cmd.sender, err.c_str(), err.length());
+                        continue;
+                    }
                 }
             }
         }
@@ -737,7 +858,7 @@ int main(int argc, char** argv){
                             if(rooms->at(i).id==roomId){
                                 roomIndex=i;
                                 found=true;
-                                int j;
+                                int j=0;
                                 for(int k=0; k<8; k++){
                                     if(rooms->at(i).players[k].fd!=-1)pCount++;
                                     if(rooms->at(i).players[k].fd==cmd.sender)j=k;
