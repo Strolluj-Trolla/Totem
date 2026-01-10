@@ -542,6 +542,12 @@ void gameRunner(long roomId){
             timeout+=timer-last;
             if(timeout>=30){
                 //wystaw mu karte
+                table.at(currentPlayer).push_back(hands.at(currentPlayer).at(0));
+                hands.at(currentPlayer).erase(hands.at(currentPlayer).begin()+0);
+                turnNum++;
+                currentPlayer=(currentPlayer+1)%playerCount;
+                timeout=0;
+                timer=time(NULL);
             }
         }
     }
