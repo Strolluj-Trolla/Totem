@@ -75,6 +75,35 @@ struct message{
 };
 typedef struct message message;
 
+std::string describeRoom(room *temp){
+    std::string roomDesc = "Room " + std::to_string(temp->id) + "- players:\n";
+
+    for (int j = 0; j < 8; j++) {
+        if (temp->players[j].fd == -1) continue;
+        roomDesc += std::string(temp->players[j].nick.c_str()) + "\n";
+    }
+
+    roomDesc += std::to_string(temp->spectatorCount) + " spectators\n";
+    if(temp->state==IDLE)roomDesc+="Waiting to start the match.\n";
+    else roomDesc+="Match in progress.\n";
+    return roomDesc;
+}
+
+int getArgument(const char* cmd, int startIndex){
+    std::string arg="";
+    for(int i=startIndex; cmd[i]!='\000'; i++){
+        arg+=cmd[i];
+    }
+    try{
+        int num=std::stoi(arg);
+        return num;
+    }
+    catch(...){
+        return -1;
+    }
+}
+
+
 void handleComms(int clientSocket, sockaddr_in clientAddress){
     managed_shared_memory segment(open_only, shm);
     clientVector* clients = segment.find<clientVector>("clients").first;
@@ -207,17 +236,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
 
                     for (i = 0; i < rooms->size(); i++) {
                         room temp = rooms->at(i);
-                        std::string roomDesc =
-                            "Room " + std::to_string(temp.id) + "- players:\n";
-
-                        for (int j = 0; j < 8; j++) {
-                            if (temp.players[j].fd == -1) break;
-                            roomDesc += std::string(temp.players[j].nick.c_str()) + "\n";
-                        }
-
-                        roomDesc += std::to_string(temp.spectatorCount) + " spectators\n";
-                        if(temp.state==IDLE)roomDesc+="Waiting to start the match.\n";
-                        else roomDesc+="Match in progress.\n";
+                        std::string roomDesc = describeRoom(&temp);
                         write(clientSocket, roomDesc.c_str(), roomDesc.length());
                     }
 
@@ -279,25 +298,12 @@ void gameRunner(long roomId){
     return;
 }
 
+
 bool running=true;
 void terminator(int signum) {
    printf("Terminating due to signal %d...\n", signum);
    running=false;
    return;
-}
-
-int getArgument(const char* cmd, int startIndex){
-    std::string arg="";
-    for(int i=startIndex; cmd[i]!='\000'; i++){
-        arg+=cmd[i];
-    }
-    try{
-        int num=std::stoi(arg);
-        return num;
-    }
-    catch(...){
-        return -1;
-    }
 }
 
 int main(int argc, char** argv){
@@ -382,18 +388,25 @@ int main(int argc, char** argv){
                         if(roomId!=-1){
                             room_mutex.lock();
                             bool found=false;
-                            for(unsigned int i=0; i<rooms->size(); i++){
+                            unsigned int players=0;
+                            unsigned int i;
+                            for(i=0; i<rooms->size(); i++){
                                 if(rooms->at(i).id==roomId){
                                     for(int j=0; j<8; j++){
                                         if(rooms->at(i).players[j].fd==cmd.sender){
                                             rooms->at(i).players[j].fd=-1;
                                             found=true;
-                                            break;
                                         }
+                                        if(rooms->at(i).players[j].fd!=-1)players++;
                                     }
                                     if(!found)rooms->at(i).spectatorCount--;
                                     break;
                                 }
+                            }
+                            if((players==0)&&(rooms->at(i).spectatorCount==0)){
+                                rooms->erase(rooms->begin()+i);
+                                std::string qName="TotemRoom"+std::to_string(roomId);
+                                message_queue::remove(qName.c_str());
                             }
                             room_mutex.unlock();
                         }
@@ -563,11 +576,9 @@ int main(int argc, char** argv){
                     if(strncmp(cmd.cmd, "start", 5)==0){
                         client_mutex.lock();
                         bool found=false;
-                        unsigned int clientIndex;
                         int roomId;
                         for(unsigned int i=0; i<clients->size(); i++){
                             if(clients->at(i).fd==cmd.sender){
-                                clientIndex=i;
                                 roomId=clients->at(i).roomId;
                                 if(roomId!=-1)found=true;
                                 break;
@@ -612,7 +623,7 @@ int main(int argc, char** argv){
                         if(!allowed){
                             room_mutex.unlock();
                             client_mutex.unlock();
-                            std::string err="You don't have perission to start a game in room "+
+                            std::string err="You don't have permission to start a game in room "+
                                 std::to_string(roomId)+"\n";
                             write(cmd.sender, err.c_str(), err.length()+1);
                             continue;
@@ -620,7 +631,7 @@ int main(int argc, char** argv){
                         rooms->at(roomIndex).state=INPROGRESS;
                         std::string qName="TotemRoom"+std::to_string(roomId);
                         message_queue::remove(qName.c_str());
-                        message_queue mq(create_only, qName.c_str(), 100, sizeof(message));
+                        message_queue roomQ(create_only, qName.c_str(), 100, sizeof(message));
                         std::thread(gameRunner, roomId).detach();
                         room_mutex.unlock();
                         client_mutex.unlock();
@@ -628,6 +639,50 @@ int main(int argc, char** argv){
                 }
                 else{
                     //przekaż do kolejki pokoju, w którym znajduje się nadawca
+                    client_mutex.lock();
+                    bool found=false;
+                    int roomId;
+                    for(unsigned int i=0; i<clients->size(); i++){
+                        if(clients->at(i).fd==cmd.sender){
+                            roomId=clients->at(i).roomId;
+                            if(roomId!=-1)found=true;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        client_mutex.unlock();
+                        write(cmd.sender, "Not in a room.\n", 16);
+                        continue;
+                    }
+                    room_mutex.lock();
+                    found=false;
+                    unsigned int roomIndex;
+                    roomState state;
+                    for(unsigned int i=0; i<rooms->size(); i++){
+                        if(rooms->at(i).id==roomId){
+                            roomIndex=i;
+                            found=true;
+                            state=rooms->at(i).state;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        room_mutex.unlock();
+                        client_mutex.unlock();
+                        std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+                        write(cmd.sender, err.c_str(), err.length()+1);
+                        continue;
+                    }
+                    std::string qName="TotemRoom"+std::to_string(roomId);
+                    message_queue roomQ(open_only, qName.c_str());
+                    if((strncmp(cmd.cmd, "refresh", 7)==0)&&(state==IDLE)){
+                        room temp=rooms->at(roomIndex);
+                        std::string roomDesc=describeRoom(&temp);
+                        write(cmd.sender, roomDesc.c_str(), roomDesc.length()+1);
+                    }
+                    else roomQ.send(&cmd, sizeof(cmd), 1);
+                    room_mutex.unlock();
+                    client_mutex.unlock();
                 }
             }
             else{
