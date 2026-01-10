@@ -31,6 +31,11 @@ typedef managed_shared_memory::segment_manager segman;
 typedef allocator<void, segman> alloc;
 typedef allocator<char, segman> charAlloc;
 typedef boost::container::basic_string<char, std::char_traits<char>,  charAlloc> string;
+enum roomState{
+    IDLE,
+    INPROGRESS
+};
+typedef enum roomState roomState;
 struct client{
     using allocator_type=alloc;
     int fd;
@@ -43,6 +48,7 @@ struct room{
     client players[8];
     time_t joinTimes[8];
     int spectatorCount;
+    roomState state;
     room(const alloc& allocate): id(-1),
         players {client(-1, -1, "", allocate),
             client(-1, -1, "", allocate),
@@ -53,7 +59,8 @@ struct room{
             client(-1, -1, "", allocate),
             client(-1, -1, "", allocate)},
         joinTimes {-1,-1,-1,-1,-1,-1,-1,-1},
-        spectatorCount(0) {}
+        spectatorCount(0),
+        state(IDLE) {}
 };
 typedef struct client client;
 typedef struct room room;
@@ -166,7 +173,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
                     clients->at(clientIndex).nick.assign(nick.c_str());
                     const char* ok =
                         "Nickname set successfully.\n"
-                        "Available commands: list, create roomId, join roomId, start, "
+                        "Available commands: list, create roomId, join roomId, spectate roomId, start, "
                         "draw turnNum, grab turnNum, refresh, leave\n";
                     write(clientSocket, ok, strlen(ok));
                     alreadySet = true;
@@ -209,6 +216,8 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
                         }
 
                         roomDesc += std::to_string(temp.spectatorCount) + " spectators\n";
+                        if(temp.state==IDLE)roomDesc+="Waiting to start the match.\n";
+                        else roomDesc+="Match in progress.\n";
                         write(clientSocket, roomDesc.c_str(), roomDesc.length());
                     }
 
@@ -219,7 +228,8 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
                     if (cmdStr.rfind("create ", 0) == 0 ||
                         cmdStr.rfind("join ",   0) == 0 ||
                         cmdStr.rfind("start",   0) == 0 ||
-                        cmdStr.rfind("leave",   0) == 0)
+                        cmdStr.rfind("leave",   0) == 0 ||
+                        cmdStr.rfind("spectate",   0) == 0)
                     {
                         mq.send(&cmd, sizeof(cmd), 0);
                     }
@@ -244,6 +254,7 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
     memset(cmd.cmd, '\0', 50);
     sprintf(cmd.cmd, "leave");
     mq.send(&cmd, sizeof(cmd), 0);
+    sleep(1); //odczekać, żeby główny wątek mógł zareagować na komendę
 
     // usunięcie klienta ze wspólnej listy
     client_mutex.lock();
@@ -261,6 +272,11 @@ void handleComms(int clientSocket, sockaddr_in clientAddress){
 
     shutdown(clientSocket, SHUT_RDWR);
     close(clientSocket);
+    return;
+}
+
+void gameRunner(long roomId){
+    return;
 }
 
 bool running=true;
@@ -357,9 +373,9 @@ int main(int argc, char** argv){
                                 if(clients->at(i).roomId!=-1){
                                     roomId=clients->at(i).roomId;
                                     clients->at(i).roomId=-1;
-                                    break;
                                 }
                                 write(cmd.sender, "Currently not in a room.", 25);
+                                break;
                             }
                         }
                         client_mutex.unlock();
@@ -375,8 +391,9 @@ int main(int argc, char** argv){
                                             break;
                                         }
                                     }
+                                    if(!found)rooms->at(i).spectatorCount--;
+                                    break;
                                 }
-                                if(found)break;
                             }
                             room_mutex.unlock();
                         }
@@ -388,15 +405,13 @@ int main(int argc, char** argv){
                         for(unsigned int i=0; i<clients->size(); i++){
                             if(clients->at(i).fd==cmd.sender){
                                 clientIndex=i;
-                                if(clients->at(i).roomId!=-1){
-                                    found=true;
-                                    write(cmd.sender, "Already in a room.\n", 20);
-                                    break;
-                                }
+                                if(clients->at(i).roomId!=-1)found=true;
+                                break;
                             }
                         }
                         if(found){
                             client_mutex.unlock();
+                            write(cmd.sender, "Already in a room.\n", 20);
                             continue;
                         };
                         int roomId=getArgument(cmd.cmd, 7);
@@ -432,14 +447,13 @@ int main(int argc, char** argv){
                     if(strncmp(cmd.cmd, "join ", 5)==0){
                         client_mutex.lock();
                         bool found=false;
+                        bool started=false;
                         unsigned int clientIndex;
                         for(unsigned int i=0; i<clients->size(); i++){
                             if(clients->at(i).fd==cmd.sender){
                                 clientIndex=i;
-                                if(clients->at(i).roomId!=-1){
-                                    found=true;
-                                    break;
-                                }
+                                if(clients->at(i).roomId!=-1)found=true;
+                                break;
                             }
                         }
                         if(found){
@@ -461,6 +475,7 @@ int main(int argc, char** argv){
                             if(rooms->at(i).id==roomId){
                                 roomIndex=i;
                                 found=true;
+                                if(rooms->at(i).state==INPROGRESS)started=true;
                                 for(int j=8; j<8; j++){
                                     if(rooms->at(i).players[j].fd==-1)free++;
                                 }
@@ -481,16 +496,138 @@ int main(int argc, char** argv){
                             write(cmd.sender, err.c_str(), err.length()+1);
                             continue;
                         }
+                        if(started){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" has already started playing. "+
+                                "Consider spectating instead.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
                         clients->at(clientIndex).roomId=roomId;
                         for(int j=8; j<8; j++){
                             if(rooms->at(roomIndex).players[j].fd==-1){
                                 rooms->at(roomIndex).players[j]=clients->at(clientIndex);
+                                rooms->at(roomIndex).joinTimes[j]=time(NULL);
                                 break;
                             }
                         }
-                        client_mutex.unlock();
                         room_mutex.unlock();
+                        client_mutex.unlock();
+                        
                     }
+                    if(strncmp(cmd.cmd, "spectate ", 9)==0){
+                        client_mutex.lock();
+                        bool found=false;
+                        unsigned int clientIndex;
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                clientIndex=i;
+                                if(clients->at(i).roomId!=-1)found=true;
+                                break;
+                            }
+                        }
+                        if(found){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Already in a room.\n", 20);
+                            continue;
+                        }
+                        int roomId=getArgument(cmd.cmd, 9);
+                        if(roomId==-1){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Invalid argument.", 18);
+                            continue;
+                        }
+                        room_mutex.lock();
+                        found=false;
+                        unsigned int roomIndex;
+                        for(unsigned int i=0; i<rooms->size(); i++){
+                            if(rooms->at(i).id==roomId){
+                                roomIndex=i;
+                                found=true;
+                                break;
+                            }
+                        }
+                        if(!found){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        clients->at(clientIndex).roomId=roomId;
+                        rooms->at(roomIndex).spectatorCount++;
+                        room_mutex.unlock();
+                        client_mutex.unlock();
+                    }
+                    if(strncmp(cmd.cmd, "start", 5)==0){
+                        client_mutex.lock();
+                        bool found=false;
+                        unsigned int clientIndex;
+                        int roomId;
+                        for(unsigned int i=0; i<clients->size(); i++){
+                            if(clients->at(i).fd==cmd.sender){
+                                clientIndex=i;
+                                roomId=clients->at(i).roomId;
+                                if(roomId!=-1)found=true;
+                                break;
+                            }
+                        }
+                        if(!found){
+                            client_mutex.unlock();
+                            write(cmd.sender, "Not in a room.\n", 16);
+                            continue;
+                        }
+                        room_mutex.lock();
+                        found=false;
+                        unsigned int roomIndex;
+                        bool allowed=false;
+                        for(unsigned int i=0; i<rooms->size(); i++){
+                            if(rooms->at(i).id==roomId){
+                                roomIndex=i;
+                                found=true;
+                                int j;
+                                for(j=0; j<8; j++){
+                                    if(rooms->at(i).players[j].fd==cmd.sender)break;
+                                }
+                                time_t min=time(NULL);
+                                int minInd=0;
+                                for(int k=0;k<8;k++){
+                                    if(rooms->at(i).joinTimes[k]<min){
+                                        min=rooms->at(i).joinTimes[k];
+                                        minInd=k;
+                                    }
+                                }
+                                if(j==minInd)allowed=true;
+                                break;
+                            }
+                        }
+                        if(!found){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        if(!allowed){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="You don't have perission to start a game in room "+
+                                std::to_string(roomId)+"\n";
+                            write(cmd.sender, err.c_str(), err.length()+1);
+                            continue;
+                        }
+                        rooms->at(roomIndex).state=INPROGRESS;
+                        std::string qName="TotemRoom"+std::to_string(roomId);
+                        message_queue::remove(qName.c_str());
+                        message_queue mq(create_only, qName.c_str(), 100, sizeof(message));
+                        std::thread(gameRunner, roomId).detach();
+                        room_mutex.unlock();
+                        client_mutex.unlock();
+                    }
+                }
+                else{
+                    //przekaż do kolejki pokoju, w którym znajduje się nadawca
                 }
             }
             else{
