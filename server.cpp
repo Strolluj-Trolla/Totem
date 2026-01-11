@@ -523,7 +523,6 @@ void gameRunner(long roomId){
                         }
                         if(opps.empty()){
                             for(int j=0; j<playerCount; j++){
-                                if(j==i)continue;
                                 for(card opC : table.at(j)){
                                     hands.at(i).push_back(opC);
                                 }
@@ -539,6 +538,12 @@ void gameRunner(long roomId){
                         else{
                             for(unsigned int j=0; j<table.at(i).size(); j++){
                                 hands.at(opps.at(j%opps.size())).push_back(table.at(i).at(j));
+                            }
+                            for(int j : opps){
+                                for(card c : table.at(j)){
+                                    hands.at(j).push_back(c);
+                                }
+                                table.at(j).clear();
                             }
                             table.at(i).clear();
                             std::string mesg="You win the fight.\n";
@@ -593,6 +598,11 @@ void gameRunner(long roomId){
                 currentPlayer=(currentPlayer+1)%playerCount;
                 timeout=0;
                 timer=time(NULL);
+                std::string state = describeState(turnNum, playerCount, currentPlayer, gameRoom, players, hands, table);
+                        
+                for (int p = 0; p < playerCount; p++) {
+                    write(players[p].fd, state.c_str(), state.length());
+                }
             }
         }
     }
