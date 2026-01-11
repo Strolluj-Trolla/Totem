@@ -105,41 +105,48 @@ class GameState:
 
         # Parsowanie graczy
         for line in lines[2:]:
-            if line.startswith("Player "):
-                # nowy gracz
-                try:
-                    rest = line[len("Player "):]
-                    nick, rest = rest.split(" has ", 1)
-                    hand = int(rest.split(" cards in hand")[0])
+            clean = line.strip()
 
-                    rest2 = rest.split("cards on the table")[0]
-                    table = int(rest2.split("and ")[1])
+            if clean.startswith("Player "):
+                try:
+                    # Player <nick> has <hand> cards in hand and <table> cards on the table.
+                    m = re.match(
+                        r"Player\s+(\S+)\s+has\s+(\d+)\s+cards in hand\s+and\s+(\d+)\s+cards on the table",
+                        clean
+                    )
+                    if not m:
+                        print("BAD PLAYER LINE:", clean)
+                        continue
+
+                    nick = m.group(1)
+                    hand = int(m.group(2))
+                    table = int(m.group(3))
 
                     current_player = {
-                        "nick": nick.strip(),
+                        "nick": nick,
                         "hand": hand,
                         "table": table,
                         "color": None,
                         "shape": None,
                     }
                     state.players.append(current_player)
-                except:
+
+                except Exception as e:
+                    print("PARSE ERROR:", e, "LINE:", clean)
                     continue
 
-            elif line.startswith("Currently on top-") and current_player:
-                # karta na wierzchu stołu
+            elif clean.startswith("Currently on top-") and current_player:
                 try:
-                    frag = line.split("color ")[1]
-                    color = int(frag.split(",")[0])
-                    shape = int(frag.split("shape ")[1])
-                    current_player["color"] = color
-                    current_player["shape"] = shape
+                    m = re.search(r"color\s+(\d+),\s*shape\s+(\d+)", clean)
+                    if m:
+                        current_player["color"] = int(m.group(1))
+                        current_player["shape"] = int(m.group(2))
                 except:
                     pass
 
-            elif "spectators watching" in line:
+            elif "spectators watching" in clean:
                 try:
-                    state.spectators = int(line.split()[0])
+                    state.spectators = int(clean.split()[0])
                 except:
                     state.spectators = 0
 
@@ -220,7 +227,7 @@ class TotemClientGUI:
         self.nickname_set = False
         self.in_room = False
 
-        self.buffer = ""
+        self.game_buffer = ""
 
         self.current_lobby = LobbyState()
         self.current_game = GameState()
@@ -323,9 +330,43 @@ class TotemClientGUI:
         for col in columns:
             self.game_tree.heading(col, text=col.capitalize())
 
-        # graficzna karta
-        self.card_canvas = tk.Canvas(f, width=120, height=160, bg="white")
-        self.card_canvas.pack(pady=10)
+        # # graficzna karta
+        # self.card_canvas = tk.Canvas(f, width=120, height=160, bg="white")
+        # self.card_canvas.pack(pady=10)
+
+        # --- RZĄD KART: LEWE 2x2, DUŻA, PRAWE 2x2 ---
+
+        row = ttk.Frame(f)
+        row.pack(fill=tk.X, pady=10)
+
+        # LEWA STRONA (2x2)
+        left_frame = ttk.Frame(row)
+        left_frame.pack(side=tk.LEFT, padx=10)
+
+        self.left_cards = []
+        for r in range(2):
+            for c in range(2):
+                canvas = tk.Canvas(left_frame, width=60, height=80, bg="white")
+                canvas.grid(row=r, column=c, padx=3, pady=3)
+                self.left_cards.append(canvas)
+
+        # DUŻA KARTA KLIENTA
+        self.card_canvas = tk.Canvas(row, width=120, height=160, bg="white")
+        self.card_canvas.pack(side=tk.LEFT, padx=20)
+
+        # PRAWA STRONA (2x2, ostatnia komórka pusta)
+        right_frame = ttk.Frame(row)
+        right_frame.pack(side=tk.LEFT, padx=10)
+
+        self.right_cards = []
+        for r in range(2):
+            for c in range(2):
+                if r == 1 and c == 1:
+                    tk.Label(right_frame, text="").grid(row=r, column=c, padx=3, pady=3)
+                    continue
+                canvas = tk.Canvas(right_frame, width=60, height=80, bg="white")
+                canvas.grid(row=r, column=c, padx=3, pady=3)
+                self.right_cards.append(canvas)
 
         bottom = ttk.Frame(f)
         bottom.pack(fill=tk.X, pady=10)
@@ -337,7 +378,6 @@ class TotemClientGUI:
     def _build_log_tab(self):
         f = self.tab_log
 
-        # Górna część: log
         log_frame = ttk.Frame(f)
         log_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -352,7 +392,6 @@ class TotemClientGUI:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text["yscrollcommand"] = scrollbar.set
 
-        # Dolna część: ręczne komendy
         cmd_frame = ttk.Frame(f)
         cmd_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
@@ -367,12 +406,19 @@ class TotemClientGUI:
                 self.net.send_line(cmd)
                 self.cmd_entry.delete(0, tk.END)
 
-        # Enter wysyła komendę
         self.cmd_entry.bind("<Return>", send_manual_cmd)
 
-        # Przycisk wysyłania
         self.send_cmd_button = ttk.Button(cmd_frame, text="Send", command=send_manual_cmd)
         self.send_cmd_button.pack(side=tk.LEFT, padx=5)
+
+
+    def _draw_small_card(self, canvas, color, shape):
+        canvas.delete("all")
+        if color is None:
+            return
+        fill = CARD_COLORS.get(color, "white")
+        canvas.create_rectangle(5, 5, 55, 75, fill=fill, outline="black")
+        canvas.create_text(30, 40, text=str(shape), font=("Arial", 14, "bold"))
 
     # ---------- LOG ----------
 
@@ -414,13 +460,28 @@ class TotemClientGUI:
 
     # ---------- KOMENDY ----------
 
+    def _return_to_lobby_after_game(self):
+        # wyślij leave do serwera
+        if self.net:
+            self.net.send_line("leave")
+
+        # zablokuj zakładkę gry
+        self.tabs.tab(2, state="disabled")
+
+        # odblokuj lobby
+        self.tabs.tab(1, state="normal")
+
+        # przełącz na lobby
+        self.tabs.select(self.tab_lobby)
+
+        # odśwież listę pokoi po krótkiej chwili
+        self.root.after(500, self.send_list)
+
     def _auto_refresh_lobby(self):
-        # odświeżaj tylko, jeśli aktualna zakładka to LOBBY (index 1)
         current_tab = self.tabs.index(self.tabs.select())
         if current_tab == 1:
             self.send_list()
 
-        # zaplanuj kolejne odświeżenie za 10 sekund
         self.root.after(10000, self._auto_refresh_lobby)
 
     def send_list(self):
@@ -499,6 +560,7 @@ class TotemClientGUI:
         # 3. Nick ustawiony
         if "Nickname set successfully" in data and not self.nickname_set:
             self.nickname_set = True
+            self.tabs.tab(0, state="disabled")
             self.tabs.tab(1, state="normal")
             self.tabs.select(self.tab_lobby)
             messagebox.showinfo("Nick", "Nick ustawiony.")
@@ -522,49 +584,108 @@ class TotemClientGUI:
             self.log(data, "error")
             return
 
+        # 5. WYGRANA / PRZEGRANA
+        if "You won the game!" in data:
+            messagebox.showinfo("Wygrana!", "Gratulacje! Wygrałeś grę!")
+            self._return_to_lobby_after_game()
+            return
+
+        if "You lost the game." in data:
+            messagebox.showinfo("Przegrana", "Niestety, przegrałeś grę.")
+            self._return_to_lobby_after_game()
+            return
+
         # 5. LOBBY — serwer zawsze zaczyna od "Available rooms:"
         if "Available rooms:" in data:
-            # wycinamy blok od nagłówka
+            # zaczynamy NOWY blok lobby
             start = data.index("Available rooms:")
             self.lobby_buffer = data[start:]
-
-            # NATYCHMIAST czyścimy tabelę
-            for item in self.lobby_tree.get_children():
-                self.lobby_tree.delete(item)
-            self.current_lobby = None
-
-            # próbujemy sparsować to, co już mamy
-            self._parse_lobby(self.lobby_buffer)
             return
 
         # jeśli jesteśmy w trakcie odbierania lobby
         if hasattr(self, "lobby_buffer"):
+            # dokładamy kolejne fragmenty
             self.lobby_buffer += data
-            self._parse_lobby(self.lobby_buffer)
-            # return
+
+            block = self.lobby_buffer
+
+            # blok lobby jest kompletny TYLKO jeśli zawiera stan pokoju
+            if "Waiting to start the match." not in block and \
+               "Match in progress." not in block:
+                # dalej czekamy na resztę danych
+                return
+
+            # mamy pełny blok → spróbuj sparsować
+            try:
+                lobby = LobbyState.parse(block)
+            except Exception:
+                # jeśli parser się wywali, nie psuj GUI
+                del self.lobby_buffer
+                return
+
+            self.current_lobby = lobby
+
+            # czyścimy tabelę DOPIERO TERAZ
+            for item in self.lobby_tree.get_children():
+                self.lobby_tree.delete(item)
+
+            # wstawiamy pokoje
+            for r in lobby.rooms:
+                self.lobby_tree.insert("", tk.END, values=(
+                    r["id"],
+                    ", ".join(r["players"]),
+                    r["spectators"],
+                    r["state"],
+                ))
+
+            # ustal, w którym pokoju jest klient
+            self.current_room_id = None
+            for r in lobby.rooms:
+                if self.nickname in r["players"]:
+                    self.current_room_id = r["id"]
+                    break
+
+            # obsługa przycisku START
+            self.start_lobby_button.configure(state=tk.DISABLED)
+            for r in lobby.rooms:
+                if self.nickname in r["players"]:
+                    host = r["players"][0] if r["players"] else None
+                    if host == self.nickname and r["state"].startswith("Waiting"):
+                        self.start_lobby_button.configure(state=tk.NORMAL)
+
+            # ten blok lobby jest już przetworzony
+            del self.lobby_buffer
+            return
+
 
         # 6. GRA — reszta danych trafia do bufora gry
-        self.buffer += data
+        self.game_buffer += data
 
         # Czy mamy początek bloku?
-        if "Turn " not in self.buffer:
+        if "Turn " not in self.game_buffer:
             return
 
         # Czy mamy koniec bloku?
-        if "spectators watching." not in self.buffer:
+        if "spectators watching." not in self.game_buffer:
             return
 
         # Wytnij blok od Turn do spectators watching
-        start = self.buffer.index("Turn ")
-        end = self.buffer.index("spectators watching.") + len("spectators watching.")
+        start = self.game_buffer.index("Turn ")
+        end = self.game_buffer.index("spectators watching.") + len("spectators watching.")
 
-        block = self.buffer[start:end]
+        block = self.game_buffer[start:end]
 
         # Przekaż do parsera
+        #DEBUG
+        print("=== BLOCK SENT TO PARSER ===")
+        print(repr(block))
+        print("============================")
+
+
         self._parse_game(block)
 
         # Usuń przetworzoną część z bufora
-        self.buffer = self.buffer[end:]
+        self.game_buffer = self.game_buffer[end:]
 
     # ---------- PARSOWANIE LOBBY ----------
 
@@ -654,15 +775,8 @@ class TotemClientGUI:
                 p["nick"], p["hand"], p["table"], card
             ))
 
-        # heurystyka: gracz z najmniejszą sumą hand+table = aktualny gracz
-        min_cards = None
-        current_player = None
+        current_player = game.current_player_nick
 
-        for p in game.players:
-            total = p["hand"] + p["table"]
-            if min_cards is None or total < min_cards:
-                min_cards = total
-                current_player = p["nick"]
 
         # podświetlenie aktualnego gracza
         for item in self.game_tree.get_children():
@@ -672,21 +786,62 @@ class TotemClientGUI:
                 self.game_tree.see(item)
                 break
 
-        # rysowanie karty aktualnego gracza
+        # rysowanie MOJEJ karty (karta klienta)
         self.card_canvas.delete("all")
 
+        my_nick = self.nickname
+        my_player = None
+
         for p in game.players:
-            if p["nick"] == current_player:
-                if p["color"] is not None:
-                    color = CARD_COLORS.get(p["color"], "white")
-                    self.card_canvas.create_rectangle(
-                        10, 10, 110, 150, fill=color, outline="black"
-                    )
-                    self.card_canvas.create_text(
-                        60, 80, text=str(p["shape"]),
-                        font=("Arial", 32, "bold")
-                    )
+            if p["nick"] == my_nick:
+                my_player = p
                 break
+
+        if my_player and my_player["color"] is not None:
+            color = CARD_COLORS.get(my_player["color"], "white")
+            self.card_canvas.create_rectangle(
+                10, 10, 110, 150, fill=color, outline="black"
+            )
+            self.card_canvas.create_text(
+                60, 80, text=str(my_player["shape"]),
+                font=("Arial", 32, "bold")
+            )
+
+        # --- RYSOWANIE KART INNYCH GRACZY ---
+
+        # znajdź indeks klienta
+        my_index = None
+        for i, p in enumerate(game.players):
+            if p["nick"] == self.nickname:
+                my_index = i
+                break
+
+        # wyczyść małe canvasy
+        for c in self.left_cards + self.right_cards:
+            c.delete("all")
+
+        if my_index is not None:
+            # zbuduj listę graczy wokół klienta (bez klienta)
+            others = []
+            for offset in range(1, len(game.players)):
+                idx = (my_index + offset) % len(game.players)
+                player = game.players[idx]
+                if player["nick"] != self.nickname:
+                    others.append(player)
+
+            # lewa strona: pierwsze 4
+            left_players = others[:4]
+
+            # prawa strona: kolejne 3
+            right_players = others[4:7]
+
+            # narysuj lewe
+            for canvas, player in zip(self.left_cards, left_players):
+                self._draw_small_card(canvas, player["color"], player["shape"])
+
+            # narysuj prawe
+            for canvas, player in zip(self.right_cards, right_players):
+                self._draw_small_card(canvas, player["color"], player["shape"])
 
         # podpowiedź turn #
         if game.turn is not None:
