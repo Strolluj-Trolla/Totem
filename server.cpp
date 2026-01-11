@@ -348,7 +348,8 @@ void gameRunner(long roomId){
     roomVector* rooms = segment.find<roomVector>("rooms").first;
     named_mutex room_mutex(open_only, rmMut);
     std::string qName="TotemRoom"+std::to_string(roomId);
-    message_queue mq(open_only, qName.c_str());
+    message_queue::remove(qName.c_str());
+    message_queue mq(create_only, qName.c_str(), 100, sizeof(message));
     alloc allocInst(segment.get_segment_manager());
 
     room gameRoom(allocInst);
@@ -369,13 +370,14 @@ void gameRunner(long roomId){
     std::shuffle(std::begin(cards), std::end(cards), rng);
     int currentPlayer=rng()%playerCount;
     std::vector<std::vector<card>> hands;
+    std::vector<std::vector<card>> table;
     for(int i=0; i<playerCount; i++){
         hands.push_back(std::vector<card>());
+        table.push_back(std::vector<card>());
     }
     for(unsigned int i=0; i<cards.size(); i++){
         hands.at(i%playerCount).push_back(cards.at(i));
     }
-    std::vector<std::vector<card>> table;
     std::vector<card> pub;
 
     bool end=false;
@@ -385,12 +387,37 @@ void gameRunner(long roomId){
     message_queue::size_type recSize;
     time_t timer=time(NULL);
     int turnNum=0;
+
+        // --- AUTOMATIC REFRESH AFTER GAME INITIALIZATION ---
+    {
+        std::string state = "Turn " + std::to_string(turnNum) + "\n";
+        state += "Current player: " + std::string(players[currentPlayer].nick.c_str()) + "\n";
+        for (int i = 0; i < playerCount; i++) {
+            state += "Player " + std::string(players.at(i).nick.c_str()) +
+                " has " + std::to_string(hands.at(i).size()) +
+                " cards in hand and " + std::to_string(table.at(i).size()) +
+                " cards on the table.\n";
+
+                if (table.at(i).size() > 0) {
+                    card topc = table.at(i).at(table.at(i).size() - 1);
+                    state += "Currently on top- color " + std::to_string(topc.color) +
+                    ", shape " + std::to_string(topc.shape) + "\n";
+                }
+        }
+        state += std::to_string(gameRoom.spectatorCount) + " spectators watching.\n";
+
+        for (int i = 0; i < playerCount; i++) {
+            write(players[i].fd, state.c_str(), state.length());
+        }
+    }
+
     while(!end){
         if(mq.try_receive(&cmd, sizeof(cmd), recSize, prio)){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
-                    for(int j=whoLeft.size(); j>=0; j--){
+                    for(int j=whoLeft.size()-1; j>=0; j--){
+                        if(currentPlayer>=playerCount)currentPlayer=0;
                         if(currentPlayer>whoLeft.at(j))currentPlayer--;
                         for(card c : hands.at(whoLeft.at(j))){
                             pub.push_back(c);
@@ -407,13 +434,17 @@ void gameRunner(long roomId){
             else{
                 if((strncmp(cmd.cmd, "refresh", 7)==0)){
                     std::string state="Turn "+std::to_string(turnNum)+"\n";
+                    state += "Current player: " + std::string(players[currentPlayer].nick.c_str()) + "\n";
                     for(int i=0; i<playerCount; i++){
-                        card topc=table.at(i).at(table.at(i).size()-1);
                         state+="Player "+std::string(players.at(i).nick.c_str())+" has "+
                             std::to_string(hands.at(i).size())+"cards in hand and "+
-                            std::to_string(table.at(i).size())+"cards on the table."+
-                            "Currently on top- color "+std::to_string(topc.color)+", shape "+
+                            std::to_string(table.at(i).size())+"cards on the table.";
+                        if(table.at(i).size()>0){
+                            card topc=table.at(i).at(table.at(i).size()-1);
+                            state+="Currently on top- color "+std::to_string(topc.color)+", shape "+
                             std::to_string(topc.shape)+"\n";
+                        }
+                        
                     }
                     state+=std::to_string(gameRoom.spectatorCount)+" spectators watching.";
                     write(cmd.sender, state.c_str(), state.length());
@@ -446,6 +477,31 @@ void gameRunner(long roomId){
                             currentPlayer=(currentPlayer+1)%playerCount;
                             timeout=0;
                             timer=time(NULL);
+
+                            // --- BROADCAST NEW GAME STATE AFTER DRAW ---
+                            {
+                                std::string state = "Turn " + std::to_string(turnNum) + "\n";
+                                state += "Current player: " + std::string(players[currentPlayer].nick.c_str()) + "\n";
+                                for (int p = 0; p < playerCount; p++) {
+                                    state += "Player " + std::string(players[p].nick.c_str()) +
+                                        " has " + std::to_string(hands[p].size()) +
+                                        " cards in hand and " + std::to_string(table[p].size()) +
+                                        " cards on the table.\n";
+                                    if (table.at(p).size() > 0) {
+                                        card topc = table.at(p).at(table.at(p).size() - 1);
+                                        state += "Currently on top- color " + std::to_string(topc.color) +
+                                        ", shape " + std::to_string(topc.shape) + "\n";
+                                    }
+
+                                }
+                                
+                                state += std::to_string(gameRoom.spectatorCount) + " spectators watching.\n";
+
+                                for (int p = 0; p < playerCount; p++) {
+                                    write(players[p].fd, state.c_str(), state.length());
+                                }
+                            }
+
                         }
                         else{
                             std::string err="Not your turn.\n";
@@ -480,12 +536,16 @@ void gameRunner(long roomId){
                         continue;
                     }
                     if(reqTurn==turnNum){
-                        card c=table.at(i).at(table.at(i).size()-1);
                         std::vector<int> opps;
-                        for(int j=0; j<playerCount; j++){
-                            if(j==i)continue;
-                            if(c.shape==table.at(j).at(table.at(j).size()-1).shape){
-                                opps.push_back(j);
+                        if(table.at(i).size()>0){
+                            card c=table.at(i).at(table.at(i).size()-1);
+                            for(int j=0; j<playerCount; j++){
+                                if(j==i)continue;
+                                if(table.at(j).size()==0)continue;
+                                int topInd=table.at(j).size()-1;
+                                if(c.shape==table.at(j).at(topInd).shape){
+                                    opps.push_back(j);
+                                }
                             }
                         }
                         if(opps.empty()){
@@ -533,6 +593,29 @@ void gameRunner(long roomId){
                         write(cmd.sender, err.c_str(), err.length());
                         continue;
                     }
+
+                    // --- BROADCAST NEW GAME STATE AFTER GRAB (ONLY IF GAME NOT ENDED) ---
+                    if (!end) {
+                        std::string state = "Turn " + std::to_string(turnNum) + "\n";
+                        state += "Current player: " + std::string(players[currentPlayer].nick.c_str()) + "\n";
+                        for (int p = 0; p < playerCount; p++) {
+                            state += "Player " + std::string(players[p].nick.c_str()) +
+                                " has " + std::to_string(hands[p].size()) +
+                                " cards in hand and " + std::to_string(table[p].size()) +
+                                " cards on the table.\n";
+                            if (table.at(p).size() > 0) {
+                                card topc = table.at(p).at(table.at(p).size() - 1);
+                                state += "Currently on top- color " + std::to_string(topc.color) +
+                                ", shape " + std::to_string(topc.shape) + "\n";
+                            }
+                        }
+                        state += std::to_string(gameRoom.spectatorCount) + " spectators watching.\n";
+
+                        for (int p = 0; p < playerCount; p++) {
+                            write(players[p].fd, state.c_str(), state.length());
+                        }
+                    }
+
                 }
             }
         }
@@ -750,7 +833,7 @@ int main(int argc, char** argv){
                                 roomIndex=i;
                                 found=true;
                                 if(rooms->at(i).state==INPROGRESS)started=true;
-                                for(int j=8; j<8; j++){
+                                for(int j=0; j<8; j++){
                                     if(rooms->at(i).players[j].fd==-1)free++;
                                 }
                                 break;
@@ -779,7 +862,7 @@ int main(int argc, char** argv){
                             continue;
                         }
                         clients->at(clientIndex).roomId=roomId;
-                        for(int j=8; j<8; j++){
+                        for(int j=0; j<8; j++){
                             if(rooms->at(roomIndex).players[j].fd==-1){
                                 rooms->at(roomIndex).players[j]=clients->at(clientIndex);
                                 rooms->at(roomIndex).joinTimes[j]=time(NULL);
@@ -870,11 +953,14 @@ int main(int argc, char** argv){
                                     if(rooms->at(i).players[k].fd==cmd.sender)j=k;
                                 }
                                 time_t min=time(NULL);
-                                int minInd=0;
-                                for(int k=0;k<8;k++){
-                                    if(rooms->at(i).joinTimes[k]<min){
-                                        min=rooms->at(i).joinTimes[k];
-                                        minInd=k;
+                                int minInd = -1;
+                                for(int k=0; k<8; k++){
+                                    if (rooms->at(i).players[k].fd == -1)
+                                        continue;
+
+                                    if (rooms->at(i).joinTimes[k] < min) {
+                                        min = rooms->at(i).joinTimes[k];
+                                        minInd = k;
                                     }
                                 }
                                 if((j==minInd)&&(pCount>=2))allowed=true;
@@ -899,8 +985,28 @@ int main(int argc, char** argv){
                         rooms->at(roomIndex).state=INPROGRESS;
                         std::string qName="TotemRoom"+std::to_string(roomId);
                         message_queue::remove(qName.c_str());
-                        message_queue roomQ(create_only, qName.c_str(), 100, sizeof(message));
                         std::thread(gameRunner, roomId).detach();
+
+                        // retry-loop: czekamy aż gameRunner utworzy kolejkę
+                        message_queue* roomQptr = nullptr;
+                        for (int tries = 0; tries < 20; tries++) {
+                            try {
+                                roomQptr = new message_queue(open_only, qName.c_str());
+                                break;
+                            } catch (...) {
+                                usleep(50000); // 50 ms
+                            }
+                        }
+                        if (!roomQptr) {
+                            printf("[ERROR] Could not open room queue after start!\n");
+                        } else {
+                            message r;
+                            r.sender = -1;
+                            strcpy(r.cmd, "refresh");
+                            roomQptr->send(&r, sizeof(r), 1);
+                            delete roomQptr;
+                        }
+
                         room_mutex.unlock();
                         client_mutex.unlock();
                     }
