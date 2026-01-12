@@ -313,7 +313,7 @@ std::vector<int> updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms
         mut.unlock();
         std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
         printf("[error] Internal error - trying to serve game in room %ld, which doesn't exist.", roomId);
-        return std::vector<int>();
+        return std::vector<int>(-1);
     }
     std::vector<client> oldPlayers(players);
     gameRoom=rooms->at(i);
@@ -419,6 +419,10 @@ void gameRunner(long roomId){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
+                    if(whoLeft.at(0)==-1){
+                        printf("Room doesn't exist, stopping the match...\n");
+                        return;
+                    }
                     for(int j=whoLeft.size()-1; j>=0; j--){
                         if(currentPlayer>=playerCount)currentPlayer=0;
                         if(currentPlayer>whoLeft.at(j))currentPlayer--;
@@ -631,7 +635,7 @@ int main(int argc, char** argv){
     hints.ai_protocol = IPPROTO_TCP;
     addrinfo * resolved;
     int res;
-    if((res= getaddrinfo("localhost", argv[1], &hints, &resolved))) {fprintf(stderr, "Getaddrinfo failed: %s\n", gai_strerror(res)); return 1;}
+    if((res= getaddrinfo("0.0.0.0", argv[1], &hints, &resolved))) {fprintf(stderr, "Getaddrinfo failed: %s\n", gai_strerror(res)); return 1;}
 
     int sock;
     if((sock=socket(resolved->ai_family, resolved->ai_socktype, resolved->ai_protocol))==-1){
@@ -1039,12 +1043,16 @@ int main(int argc, char** argv){
                     printf("%d - %s;\n", clients->at(i).fd, nick);
                 }
                 client_mutex.unlock();
-                sleep(1);
+                usleep(50000);
             }
         }
     }
 
     sleep(2);
+    for(unsigned int i=0; i<clients->size(); i++){
+        shutdown(clients->at(i).fd, SHUT_RDWR);
+        close(clients->at(i).fd);
+    }
     segment.destroy<clientVector>("clients");
     segment.destroy<roomVector>("rooms");
     message_queue::remove(MQ_NAME);
