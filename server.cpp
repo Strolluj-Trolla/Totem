@@ -311,9 +311,8 @@ std::vector<int> updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms
     }
     if(!found){
         mut.unlock();
-        std::string err="Room "+std::to_string(roomId)+" doesn't exist.\n";
-        printf("[error] Internal error - trying to serve game in room %ld, which doesn't exist.", roomId);
-        return std::vector<int>(-1);
+        printf("[error] Internal error - trying to serve game in room %ld, which doesn't exist.\n", roomId);
+        return std::vector<int>({-1});
     }
     std::vector<client> oldPlayers(players);
     gameRoom=rooms->at(i);
@@ -326,6 +325,7 @@ std::vector<int> updateRoomVars(long roomId, named_mutex& mut, roomVector* rooms
         if(gameRoom.players[i].fd!=-1) players.push_back(gameRoom.players[i]);
     };
     mut.unlock();
+    printf("See who left\n");
     std::vector<int> whoLeft;
     for(i=0; i<oldPlayers.size(); i++){
         int cntr=0;
@@ -418,6 +418,7 @@ void gameRunner(long roomId){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
+                    printf("%d - hehehehehehehehe\n", whoLeft.at(0));
                     if(whoLeft.at(0)==-1){
                         printf("Room doesn't exist, stopping the match...\n");
                         message_queue::remove(qName.c_str());
@@ -697,7 +698,7 @@ int main(int argc, char** argv){
                                     roomId=clients->at(i).roomId;
                                     clients->at(i).roomId=-1;
                                 }
-                                write(cmd.sender, "Currently not in a room.", 25);
+                                else write(cmd.sender, "Currently not in a room.", 25);
                                 break;
                             }
                         }
@@ -1008,7 +1009,7 @@ int main(int argc, char** argv){
                     }
                     if(!found){
                         client_mutex.unlock();
-                        write(cmd.sender, "Not in a room.\n", 16);
+                        write(cmd.sender, "Not in a, room.\n", 16);
                         continue;
                     }
                     room_mutex.lock();
@@ -1030,19 +1031,24 @@ int main(int argc, char** argv){
                         write(cmd.sender, err.c_str(), err.length());
                         continue;
                     }
-                    std::string qName="TotemRoom"+std::to_string(roomId);
-                    message_queue roomQ(open_only, qName.c_str());
                     if((strncmp(cmd.cmd, "refresh", 7)==0)&&(state==IDLE)){
                         room temp=rooms->at(roomIndex);
                         std::string roomDesc=describeRoom(&temp);
                         write(cmd.sender, roomDesc.c_str(), roomDesc.length());
                     }
-                    else roomQ.send(&cmd, sizeof(cmd), 1);
+                    else{
+                        if(state==INPROGRESS){
+                            std::string qName="TotemRoom"+std::to_string(roomId);
+                            message_queue roomQ(open_only, qName.c_str());
+                            roomQ.send(&cmd, sizeof(cmd), 1);
+                        }
+                    }
                     room_mutex.unlock();
                     client_mutex.unlock();
                 }
             }
             else{
+                /*
                 client_mutex.lock();
                 printf("Current clients:\n");
                 for(unsigned int i=0; i<clients->size(); i++){
@@ -1050,6 +1056,7 @@ int main(int argc, char** argv){
                     printf("%d - %s;\n", clients->at(i).fd, nick);
                 }
                 client_mutex.unlock();
+                */
                 usleep(50000);
             }
         }
