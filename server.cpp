@@ -963,8 +963,6 @@ int main(int argc, char** argv){
                         if(!idle){
                             room_mutex.unlock();
                             client_mutex.unlock();
-                            std::string err="Game already in progress.\n";
-                            write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
                         rooms->at(roomIndex).state=INPROGRESS;
