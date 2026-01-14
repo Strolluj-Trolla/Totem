@@ -344,6 +344,7 @@ struct card{
 typedef struct card card;
 
 std::string describeState(int &turnNum, int &playerCount, int &currentPlayer, room &gameRoom, std::vector<client> &players, std::vector<std::vector<card>> &hands, std::vector<std::vector<card>> &table){
+    if(playerCount==0)return "All players left- match halted.\n";
     std::string state = "Turn " + std::to_string(turnNum) + "\n";
     state += "Current player: " + std::string(players.at(currentPlayer).nick.c_str()) + "\n";
     for (int i = 0; i < playerCount; i++) {
@@ -418,7 +419,6 @@ void gameRunner(long roomId){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
-                    printf("%d - hehehehehehehehe\n", whoLeft.at(0));
                     if(whoLeft.at(0)==-1){
                         printf("Room doesn't exist, stopping the match...\n");
                         message_queue::remove(qName.c_str());
@@ -437,6 +437,7 @@ void gameRunner(long roomId){
                         table.erase(table.begin()+whoLeft.at(j));
                     }
                 }
+
             }
             else{
                 if((strncmp(cmd.cmd, "refresh", 7)==0)){
@@ -593,7 +594,7 @@ void gameRunner(long roomId){
             time_t last=timer;
             timer=time(NULL);
             timeout+=timer-last;
-            if(timeout>=30){
+            if((timeout>=30)&&(playerCount!=0)){
                 //wystaw mu karte
                 if(hands.at(currentPlayer).size()>0){
                     table.at(currentPlayer).push_back(hands.at(currentPlayer).at(0));
