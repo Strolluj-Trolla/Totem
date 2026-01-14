@@ -368,7 +368,6 @@ void gameRunner(long roomId){
     roomVector* rooms = segment.find<roomVector>("rooms").first;
     named_mutex room_mutex(open_only, rmMut);
     std::string qName="TotemRoom"+std::to_string(roomId);
-    message_queue::remove(qName.c_str());
     message_queue mq(create_only, qName.c_str(), 100, sizeof(message));
     alloc allocInst(segment.get_segment_manager());
 
@@ -608,6 +607,7 @@ void gameRunner(long roomId){
                     write(players[p].fd, state.c_str(), state.length());
                 }
             }
+            usleep(50000);
         }
     }
 
@@ -919,10 +919,12 @@ int main(int argc, char** argv){
                         unsigned int roomIndex;
                         bool allowed=false;
                         unsigned int pCount=0;
+                        bool idle=false;
                         for(unsigned int i=0; i<rooms->size(); i++){
                             if(rooms->at(i).id==roomId){
                                 roomIndex=i;
                                 found=true;
+                                if(rooms->at(i).state==IDLE)idle=true;
                                 int j=0;
                                 for(int k=0; k<8; k++){
                                     if(rooms->at(i).players[k].fd!=-1)pCount++;
@@ -955,6 +957,13 @@ int main(int argc, char** argv){
                             client_mutex.unlock();
                             std::string err="You don't have permission to start a game in room "+
                                 std::to_string(roomId)+" or there are less than 2 players.\n";
+                            write(cmd.sender, err.c_str(), err.length());
+                            continue;
+                        }
+                        if(!idle){
+                            room_mutex.unlock();
+                            client_mutex.unlock();
+                            std::string err="Game already in progress.\n";
                             write(cmd.sender, err.c_str(), err.length());
                             continue;
                         }
