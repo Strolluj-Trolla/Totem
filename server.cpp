@@ -418,7 +418,6 @@ void gameRunner(long roomId){
             if((strncmp(cmd.cmd, "leave", 5)==0)||(strncmp(cmd.cmd, "spectate", 8)==0)){
                 std::vector<int> whoLeft=updateRoomVars(roomId, room_mutex, rooms, gameRoom, playerCount, players);
                 if(!whoLeft.empty()){
-                    printf("%d - hehehehehehehehe\n", whoLeft.at(0));
                     if(whoLeft.at(0)==-1){
                         printf("Room doesn't exist, stopping the match...\n");
                         message_queue::remove(qName.c_str());
