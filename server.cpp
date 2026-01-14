@@ -420,6 +420,7 @@ void gameRunner(long roomId){
                 if(!whoLeft.empty()){
                     if(whoLeft.at(0)==-1){
                         printf("Room doesn't exist, stopping the match...\n");
+                        message_queue::remove(qName.c_str());
                         return;
                     }
                     for(int j=whoLeft.size()-1; j>=0; j--){
@@ -726,7 +727,6 @@ int main(int argc, char** argv){
                             }
                             if((players==0)&&(rooms->at(i).spectatorCount==0)){
                                 rooms->erase(rooms->begin()+i);
-                                message_queue::remove(qName.c_str());
                             }
                             room_mutex.unlock();
                         }
