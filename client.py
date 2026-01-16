@@ -103,19 +103,20 @@ class GameState:
 
         state = GameState()
         state.players = []
-
         current_player = None
 
-        if lines[0].startswith("Turn "):
-            try:
-                state.turn = int(lines[0].split()[1])
-            except:
-                state.turn = None
+        for line in lines:
+            if line.startswith("Turn "):
+                try:
+                    state.turn = int(line.split()[1])
+                except:
+                    state.turn = None
+                continue
 
-        if len(lines) > 1 and lines[1].startswith("Current player:"):
-            state.current_player_nick = lines[1].split(":", 1)[1].strip()
+            if line.startswith("Current player:"):
+                state.current_player_nick = line.split(":", 1)[1].strip()
+                continue
 
-        for line in lines[2:]:
             clean = line.strip()
 
             if clean.startswith("Player "):
@@ -236,6 +237,7 @@ class TotemClientGUI:
         self.is_spectator = False
         self.spectator_refresh_timer = None
         self.lobby_refresh_timer = None
+        self.game_started = False
 
         self.game_buffer = ""
         self.lobby_buffer = ""
@@ -365,11 +367,20 @@ class TotemClientGUI:
         left_frame.pack(side=tk.LEFT, padx=10)
 
         self.left_cards = []
+        self.left_nicks = []
         for r in range(2):
             for c in range(2):
-                canvas = tk.Canvas(left_frame, width=60, height=80, bg="white")
-                canvas.grid(row=r, column=c, padx=3, pady=3)
+                card_frame = ttk.Frame(left_frame)
+                card_frame.grid(row=r, column=c, padx=3, pady=3)
+                
+                canvas = tk.Canvas(card_frame, width=60, height=80, bg="white")
+                canvas.pack()
+                
+                label = ttk.Label(card_frame, text="", font=("Arial", 8))
+                label.pack()
+                
                 self.left_cards.append(canvas)
+                self.left_nicks.append(label)
 
         self.card_canvas = tk.Canvas(cards_frame, width=120, height=160, bg="white")
         self.card_canvas.pack(side=tk.LEFT, padx=20)
@@ -378,23 +389,20 @@ class TotemClientGUI:
         right_frame.pack(side=tk.LEFT, padx=10)
 
         self.right_cards = []
+        self.right_nicks = []
         for r in range(2):
             for c in range(2):
-                canvas = tk.Canvas(right_frame, width=60, height=80, bg="white")
-                canvas.grid(row=r, column=c, padx=3, pady=3)
+                card_frame = ttk.Frame(right_frame)
+                card_frame.grid(row=r, column=c, padx=3, pady=3)
+                
+                canvas = tk.Canvas(card_frame, width=60, height=80, bg="white")
+                canvas.pack()
+                
+                label = ttk.Label(card_frame, text="", font=("Arial", 8))
+                label.pack()
+                
                 self.right_cards.append(canvas)
-
-        self.left_labels = []
-        self.right_labels = []
-        for canvas in self.left_cards:
-            label = ttk.Label(left_frame, text="", font=("Arial", 8))
-            label.grid(row=canvas.grid_info()["row"] + 1, column=canvas.grid_info()["column"], pady=(0, 3))
-            self.left_labels.append(label)
-        
-        for canvas in self.right_cards:
-            label = ttk.Label(right_frame, text="", font=("Arial", 8))
-            label.grid(row=canvas.grid_info()["row"] + 1, column=canvas.grid_info()["column"], pady=(0, 3))
-            self.right_labels.append(label)
+                self.right_nicks.append(label)
 
         self.spectator_frame = ttk.Frame(f)
         
@@ -462,15 +470,18 @@ class TotemClientGUI:
         self.send_cmd_button = ttk.Button(cmd_frame, text="Send", command=self.send_manual_cmd)
         self.send_cmd_button.pack(side=tk.LEFT, padx=5)
 
-    def _draw_small_card(self, canvas, color, shape):
+    def _draw_small_card(self, canvas, color, shape, nick=""):
         canvas.delete("all")
         if color is None:
             canvas.create_rectangle(2, 2, 58, 78, fill="lightgray", outline="black")
-            canvas.create_text(30, 40, text="?", font=("Arial", 12))
-            return
-        fill = CARD_COLORS.get(color, "white")
-        canvas.create_rectangle(5, 5, 55, 75, fill=fill, outline="black", width=2)
-        canvas.create_text(30, 40, text=str(shape), font=("Arial", 14, "bold"))
+            canvas.create_text(30, 30, text="?", font=("Arial", 12))
+        else:
+            fill = CARD_COLORS.get(color, "white")
+            canvas.create_rectangle(5, 5, 55, 75, fill=fill, outline="black", width=2)
+            canvas.create_text(30, 30, text=str(shape), font=("Arial", 14, "bold"))
+        
+        if nick:
+            canvas.create_text(30, 60, text=nick[:6], font=("Arial", 8))
 
     def _draw_big_card(self, canvas, color, shape):
         canvas.delete("all")
@@ -503,7 +514,7 @@ class TotemClientGUI:
         for canvas in self.left_cards + self.right_cards:
             canvas.delete("all")
         
-        for label in self.left_labels + self.right_labels:
+        for label in self.left_nicks + self.right_nicks:
             label.config(text="")
         
         for canvas in self.spectator_cards:
@@ -544,6 +555,10 @@ class TotemClientGUI:
         if self.lobby_refresh_timer:
             self.root.after_cancel(self.lobby_refresh_timer)
         
+        if self.game_started:
+            self._stop_lobby_refresh()
+            return
+            
         if not self.is_spectator and self.in_room and self.net and self.net.connected:
             self.net.send_line("list")
             self.msg_queue.put((f"[CLIENT -> SERVER] list", "client"))
@@ -610,6 +625,7 @@ class TotemClientGUI:
         self.tabs.select(0)
         self.is_spectator = False
         self.in_room = False
+        self.game_started = False
 
     def send_manual_cmd(self):
         cmd = self.cmd_entry.get().strip()
@@ -619,7 +635,7 @@ class TotemClientGUI:
             self.cmd_entry.delete(0, tk.END)
 
     def send_list(self):
-        if self.net:
+        if self.net and not self.game_started:
             self.net.send_line("list")
             self.msg_queue.put((f"[CLIENT -> SERVER] list", "client"))
 
@@ -634,6 +650,7 @@ class TotemClientGUI:
         if self.net:
             self._stop_spectator_refresh()
             self._stop_lobby_refresh()
+            self.game_started = False
             self.leaving_room = True
             self.net.send_line("leave")
             self.msg_queue.put((f"[CLIENT -> SERVER] leave", "client"))
@@ -656,6 +673,8 @@ class TotemClientGUI:
         if self.net and not self.is_spectator:
             self.net.send_line("start")
             self.msg_queue.put((f"[CLIENT -> SERVER] start", "client"))
+            self._stop_lobby_refresh()
+            self.game_started = True
 
     def send_refresh(self):
         if self.net:
@@ -685,6 +704,7 @@ class TotemClientGUI:
         if self.net:
             self._stop_spectator_refresh()
             self._stop_lobby_refresh()
+            self.game_started = False
             self.net.send_line(f"join {rid}")
             self.msg_queue.put((f"[CLIENT -> SERVER] join {rid}", "client"))
             self.is_spectator = False
@@ -702,6 +722,7 @@ class TotemClientGUI:
         if self.net:
             self._stop_spectator_refresh()
             self._stop_lobby_refresh()
+            self.game_started = False
             self.net.send_line(f"spectate {rid}")
             self.msg_queue.put((f"[CLIENT -> SERVER] spectate {rid}", "client"))
             self.is_spectator = True
@@ -710,39 +731,14 @@ class TotemClientGUI:
             self._update_spectator_view()
             self.root.after(500, self._start_spectator_refresh)
 
-    def _handle_all_players_left(self):
-        if self.is_spectator:
-            self.log("[SYSTEM] All players left - match halted. Sending leave command.", "system")
-            
-            # Wyślij komendę leave do serwera
-            if self.net:
-                self.net.send_line("leave")
-                self.msg_queue.put((f"[CLIENT -> SERVER] leave", "client"))
-            
-            self._stop_spectator_refresh()
-            self.current_room_id = None
-            self.in_room = False
-            self.is_spectator = False
-            
-            self.tabs.tab(2, state="disabled")
-            self.tabs.tab(1, state="normal")
-            self.tabs.select(self.tab_lobby)
-            
-            self._clear_game_ui()
-            self.game_buffer = ""
-            
-            self.root.after(1000, self.send_list)
-
     def _return_to_lobby_after_game(self):
-        if self.leaving_room:
-            return
-            
         if self.net:
             self.net.send_line("leave")
             self.msg_queue.put((f"[CLIENT -> SERVER] leave", "client"))
         
         self._stop_spectator_refresh()
         self._stop_lobby_refresh()
+        self.game_started = False
         self.tabs.tab(2, state="disabled")
         self.tabs.tab(1, state="normal")
         self.tabs.select(self.tab_lobby)
@@ -754,7 +750,7 @@ class TotemClientGUI:
         self._clear_game_ui()
         self.game_buffer = ""
         
-        self.root.after(1000, self.send_list)
+        self.root.after(500, self.send_list)
 
     def _schedule_poll(self):
         self.root.after(50, self._poll)
@@ -802,6 +798,7 @@ class TotemClientGUI:
         if "Currently not in a room" in data or "Not in a room" in data:
             self._stop_spectator_refresh()
             self._stop_lobby_refresh()
+            self.game_started = False
             self.current_room_id = None
             self.in_room = False
             self.is_spectator = False
@@ -813,24 +810,24 @@ class TotemClientGUI:
             self.root.after(500, self.send_list)
             return
 
-        if "All players left- match halted." in data:
-            self._handle_all_players_left()
-            return
-
-        if "Room " in data and "is full." in data:
-            room_id = data.split()[1]
-            messagebox.showwarning("Room Full", f"Room {room_id} is full. Cannot join.")
-            self.log(f"[SYSTEM] Room {room_id} is full", "system")
-            return
-
         if "Turn " in data and not self.in_lobby_response:
             self.game_buffer = data + "\n"
+            if "spectators watching" in data:
+                self.root.after(100, self._process_game_buffer)
             return
             
         if self.game_buffer and not self.in_lobby_response:
             self.game_buffer += data + "\n"
             
-            if "spectators watching" in data:
+            end_indicators = [
+                "spectators watching",
+                "spectators\n",
+                "cards on the table",
+                "Match halted",
+                "All players left"
+            ]
+            
+            if any(indicator in data for indicator in end_indicators):
                 self.root.after(100, self._process_game_buffer)
             return
 
@@ -839,6 +836,8 @@ class TotemClientGUI:
             self.tabs.tab(2, state="normal")
             self.tabs.select(self.tab_game)
             self._update_spectator_view()
+            self._stop_lobby_refresh()
+            self.game_started = True
             return
 
         error_keywords = [
@@ -868,7 +867,7 @@ class TotemClientGUI:
             self._return_to_lobby_after_game()
             return
 
-        if "Available rooms:" in data:
+        if "Available rooms:" in data and not self.game_started:
             self.in_lobby_response = True
             self.lobby_buffer = data + "\n"
             return
@@ -926,7 +925,7 @@ class TotemClientGUI:
                                     self.start_lobby_button.configure(state=tk.NORMAL)
                             break
                 
-                if not self.is_spectator and self.in_room and not self.lobby_refresh_timer:
+                if not self.game_started and not self.is_spectator and self.in_room and not self.lobby_refresh_timer:
                     self.root.after(1000, self._start_lobby_refresh)
                 
         except Exception as e:
@@ -977,7 +976,7 @@ class TotemClientGUI:
                     self._draw_cards(game)
                 
         except Exception as e:
-            self.log(f"[ERROR] Game parsing error: {e}", "error")
+            self.log(f"[ERROR] Game parsing error: {e}\nBuffer was:\n{self.game_buffer}", "error")
         finally:
             self.game_buffer = ""
 
@@ -1057,7 +1056,7 @@ class TotemClientGUI:
         for canvas in self.left_cards + self.right_cards:
             canvas.delete("all")
         
-        for label in self.left_labels + self.right_labels:
+        for label in self.left_nicks + self.right_nicks:
             label.config(text="")
         
         if my_index >= 0 and len(game.players) > 1:
@@ -1069,14 +1068,12 @@ class TotemClientGUI:
             for i in range(min(4, len(other_players))):
                 player = other_players[i]
                 if i < len(self.left_cards):
-                    self._draw_small_card(self.left_cards[i], player["color"], player["shape"])
-                    self.left_labels[i].config(text=player["nick"][:8])
+                    self._draw_small_card(self.left_cards[i], player["color"], player["shape"], player["nick"])
             
             for i in range(min(3, len(other_players) - 4)):
                 player = other_players[i + 4]
                 if i < len(self.right_cards):
-                    self._draw_small_card(self.right_cards[i], player["color"], player["shape"])
-                    self.right_labels[i].config(text=player["nick"][:8])
+                    self._draw_small_card(self.right_cards[i], player["color"], player["shape"], player["nick"])
 
     def _draw_spectator_cards(self, game):
         for canvas in self.spectator_cards:
