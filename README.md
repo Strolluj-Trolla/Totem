@@ -24,6 +24,7 @@ Kliknięcie totemu bez trwania pojedynku oznacza zebranie WSZYSTKICH wyłożonyc
 Gracz, który jako pierwszy pozbędzie się wsystkich kart (w tym tych już wyłożonych) wygrywa.
 
 Po zakończeniu rozgrywki gracze mogą wrócić do lobby.
+
 ---
 Autorzy:
 * Marcin Pastuszak, 160164, lab 5
