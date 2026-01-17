@@ -1,6 +1,7 @@
 # Totem
 ---
 ---------- Sieciowa wersja Jungle Speed ----------
+
 Opis:
 
 Gracz łączy się z serwerem i wybiera swój nick. Jeśli jest on zajęty, serwer wymusza jego zmianę.
